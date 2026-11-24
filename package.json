@@ -8,6 +8,8 @@
     "start": "npm run build && electron .",
     "build": "tsc -p tsconfig.json",
     "test": "npm run build && node --test test/relay.test.mjs",
+    "build:mac": "npm run build && electron-builder --mac dir --publish never -c.mac.identity=- -c.mac.hardenedRuntime=false -c.mac.notarize=false",
+    "build:mac:dmg": "npm run build && electron-builder --mac dmg --publish never",
     "build:win": "npm run build && electron-builder --win nsis --x64 --publish never"
   },
   "engines": { "node": ">=24" },
@@ -22,7 +24,8 @@
     "productName": "文章同步",
     "directories": { "output": "release" },
     "files": ["dist/**/*", "ui/**/*", "package.json"],
-    "win": { "target": "nsis", "artifactName": "ArticleRelay-${version}-Windows-${arch}.${ext}" },
+    "mac": { "icon": "ui/icon.svg", "artifactName": "ArticleRelay-${version}-macOS-${arch}.${ext}" },
+    "win": { "icon": "ui/icon.svg", "target": "nsis", "artifactName": "ArticleRelay-${version}-Windows-${arch}.${ext}" },
     "nsis": { "oneClick": false, "perMachine": false }
   }
 }

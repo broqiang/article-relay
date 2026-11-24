@@ -14,6 +14,7 @@ const workspaceAssets = new Map([
   ['/index.html', 'text/html'],
   ['/styles.css', 'text/css'],
   ['/app.js', 'text/javascript'],
+  ['/icon.svg', 'image/svg+xml'],
 ])
 
 protocol.registerSchemesAsPrivileged([{

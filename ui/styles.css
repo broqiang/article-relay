@@ -24,14 +24,14 @@ h1, h2, h3, p { margin: 0; }
   border-bottom: 1px solid var(--line);
 }
 
-.brand-mark, .platform-icon {
+.platform-icon {
   display: grid;
   place-items: center;
   border-radius: 11px;
   font-weight: 700;
 }
 
-.brand-mark { width: 34px; height: 34px; background: #233f78; color: white; font-size: 20px; }
+.brand-mark { display: block; flex: none; }
 h1 { font-size: 19px; }
 .top-route { margin-left: auto; color: var(--muted); font-size: 13px; }
 .top-route span { margin: 0 4px; }
