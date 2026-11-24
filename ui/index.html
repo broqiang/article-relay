@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; base-uri 'none'; form-action 'none'">
+  <title>文章同步</title>
+  <link rel="stylesheet" href="styles.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <span class="brand-mark" aria-hidden="true">↗</span>
+    <h1>文章同步</h1>
+    <span class="top-route">微信公众号 <span aria-hidden="true">→</span> 知乎</span>
+  </header>
+  <main class="workspace">
+    <aside class="sidebar">
+      <section aria-labelledby="account-heading" class="account">
+        <h2 id="account-heading">发布账号</h2>
+        <div class="platform">
+          <span class="platform-icon" aria-hidden="true">知</span>
+          <div><strong>知乎</strong><p id="account-name">正在启动应用界面…</p></div>
+        </div>
+        <div class="account-actions">
+          <button id="login" type="button" class="secondary">打开知乎</button>
+          <button id="check" type="button" class="quiet">检查登录</button>
+        </div>
+      </section>
+      <form id="source-form">
+        <label for="source-url">公众号文章链接</label>
+        <input id="source-url" type="url" placeholder="https://mp.weixin.qq.com/s/…" required>
+        <button id="import" class="primary" type="submit">导入公众号文章</button>
+        <button id="continue" class="secondary" type="button" hidden>继续读取文章</button>
+      </form>
+      <p id="status" class="status" role="status" aria-live="polite"></p>
+      <section class="task-section" aria-labelledby="task-list-heading">
+        <h2 id="task-list-heading">文章任务</h2>
+        <p class="muted" id="no-tasks">暂无记录</p>
+        <ul class="task-list" id="task-list"></ul>
+      </section>
+    </aside>
+    <section class="stage" aria-labelledby="workspace-heading">
+      <div class="stage-bar">
+        <h2 id="workspace-heading">同步工作区</h2>
+        <button id="back" type="button" class="quiet" hidden>返回工作区</button>
+      </div>
+      <div class="stage-content">
+        <div id="empty" class="empty">
+          <div class="file-icon" aria-hidden="true"><span></span><span></span><span></span></div>
+          <h3>还没有文章任务</h3>
+          <p>粘贴公众号链接，导入后可将本地素材同步到知乎。</p>
+        </div>
+        <div class="summary" id="summary" hidden>
+          <div class="result">
+            <span class="result-status" id="task-status"></span>
+            <h3 id="task-title"></h3>
+            <p class="source-link" id="task-source"></p>
+            <div class="result-actions">
+              <button id="sync" type="button" class="primary">同步到知乎草稿</button>
+              <button id="retry-import" type="button" class="secondary" hidden>继续导入</button>
+              <button id="refresh-import" type="button" class="quiet" hidden>重新导入原文</button>
+            </div>
+          </div>
+          <section class="task-detail" aria-labelledby="import-heading">
+            <h3 id="import-heading">公众号导入</h3>
+            <p id="import-extraction" class="muted"></p>
+            <p id="import-progress" role="status" aria-live="polite"></p>
+            <progress id="download-progress" aria-label="图片下载进度" hidden></progress>
+          </section>
+          <section class="task-detail" aria-labelledby="history-heading">
+            <h3 id="history-heading">平台同步记录</h3>
+            <p class="muted" id="no-runs">还没有同步记录</p>
+            <ul class="run-list" id="run-list"></ul>
+          </section>
+        </div>
+      </div>
+    </section>
+  </main>
+</body>
+</html>
