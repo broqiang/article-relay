@@ -11,8 +11,8 @@ import { draftUrl, Zhihu } from '../dist/zhihu.js'
 import { checkZhihuArticle, publishZhihuDraft } from '../dist/zhihu-publish.js'
 import { Weibo, findWeiboPublishedUrl, isWeiboSsoCallback, weiboArticleUrl, weiboDraftUrl, weiboEditor, weiboHistoryUrl } from '../dist/weibo.js'
 import { checkWeiboArticle, publishWeiboDraft } from '../dist/weibo-publish.js'
-import { chromiumUserAgent } from '../dist/browser.js'
-import { TaskStore, taskSummary } from '../dist/tasks.js'
+import { chromiumUserAgent, publicationUrlStatus } from '../dist/browser.js'
+import { blockingPublication, clearPublishedRun, publishMissingPlatforms, TaskStore, taskSummary } from '../dist/tasks.js'
 
 test('initializes the bridge without CommonJS exports in a sandboxed preload', async () => {
   const preload = readFileSync(new URL('../dist/preload.js', import.meta.url), 'utf8')
@@ -44,6 +44,8 @@ test('initializes the bridge without CommonJS exports in a sandboxed preload', a
   assert.equal(await bridge.openWeibo(), 'relay:open-weibo')
   assert.equal(await bridge.checkAccount(), 'relay:account')
   assert.equal(JSON.stringify(await bridge.deleteTask('task')), '{"channel":"relay:delete-task","args":{"taskId":"task"}}')
+  assert.equal(JSON.stringify(await bridge.deletePublication('task', 'run')), '{"channel":"relay:delete-publication","args":{"taskId":"task","runId":"run"}}')
+  assert.equal(JSON.stringify(await bridge.publishAll('task')), '{"channel":"relay:publish-all","args":{"taskId":"task"}}')
   assert.equal(JSON.stringify(await bridge.publishArticle('task')), '{"channel":"relay:publish","args":{"taskId":"task"}}')
   assert.equal(JSON.stringify(await bridge.publishArticle('task', 'weibo')), '{"channel":"relay:publish","args":{"taskId":"task","platform":"weibo"}}')
   assert.equal(JSON.stringify(await bridge.showDraft('task', 'run')), '{"channel":"relay:show-draft","args":{"taskId":"task","runId":"run"}}')
@@ -53,6 +55,55 @@ test('initializes the bridge without CommonJS exports in a sandboxed preload', a
   weiboAccountChanged({ sender: 'internal event' }, '微博账号')
   weiboAccountChanged({ sender: 'internal event' }, null)
   assert.deepEqual(accounts, ['微博账号', null])
+})
+
+test('publishes only eligible platforms, keeps going after failures, and includes a cleared platform on retry', async () => {
+  const published = { id: 'wb', platform: 'weibo', owner: 'original', draftId: '9', state: 'published' }
+  const relatedFailure = { ...published, id: 'wb-failed', state: 'failed' }
+  const zhihuFailure = { id: 'zh-failed', platform: 'zhihu', state: 'failed' }
+  const task = { importState: 'ready', article: {}, runs: [relatedFailure, zhihuFailure, published] }
+  const attempts = []
+  const batch = (publish) => publishMissingPlatforms(() => task, async (current, platform) => {
+    attempts.push(platform)
+    return publish(current, platform)
+  })
+  const states = (outcomes) => outcomes.map(({ state }) => state)
+
+  assert.equal(blockingPublication(task.runs, 'weibo'), published)
+  assert.deepEqual(states(await batch(() => ({ loginRequired: true }))), ['login-required', 'already-published'])
+  assert.deepEqual(attempts, ['zhihu'])
+
+  task.runs = clearPublishedRun(task.runs, published)
+  assert.deepEqual(task.runs, [zhihuFailure])
+  attempts.length = 0
+  const retried = await batch((_task, platform) => {
+    if (platform === 'zhihu') throw new Error('连接失败')
+    return { published: true }
+  })
+  assert.deepEqual(states(retried), ['failed', 'published'])
+  assert.equal(retried[0].detail, '连接失败')
+  assert.deepEqual(attempts, ['zhihu', 'weibo'])
+
+  task.runs = [{ ...zhihuFailure, state: 'publish-uncertain' }, published]
+  attempts.length = 0
+  assert.deepEqual(states(await batch(() => assert.fail('unexpected publication'))), ['needs-check', 'already-published'])
+  assert.deepEqual(attempts, [])
+})
+
+test('accepts missing-article status only from the exact, non-redirected publication URL', async () => {
+  const url = 'https://zhuanlan.zhihu.com/p/123456'
+  const probe = (status, finalUrl = url, redirected = false) => publicationUrlStatus(async (address, options) => {
+    assert.equal(address, url)
+    assert.equal(options.redirect, 'manual')
+    assert.equal(options.cache, 'no-store')
+    return { status, url: finalUrl, redirected }
+  }, url)
+  assert.equal(await probe(404), 'missing')
+  assert.equal(await probe(410), 'missing')
+  for (const status of [200, 302, 401, 403, 429, 500]) assert.equal(await probe(status), 'unknown')
+  assert.equal(await probe(404, 'https://www.zhihu.com/signin'), 'unknown')
+  assert.equal(await probe(404, url, true), 'unknown')
+  assert.equal(await publicationUrlStatus(async () => { throw new Error('超时') }, url), 'unknown')
 })
 
 test('allows only the observed HTTPS Weibo SSO callback paths', () => {

@@ -81,7 +81,7 @@ export class Zhihu {
 
   async account(): Promise<ZhihuAccount | null> {
     const step = '检查知乎账号'
-    const response = await this.fetch('https://www.zhihu.com/api/v4/me', step)
+    const response = await this.fetch('https://www.zhihu.com/api/v4/me', step, { cache: 'no-store' })
     if (response.status === 401) return null
     const body = await this.json(response, step)
     if (typeof body.id !== 'string' || !body.id) return null

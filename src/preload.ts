@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld('relay', {
     ? ipcRenderer.invoke('relay:account', { platform }) : ipcRenderer.invoke('relay:account'),
   listTasks: () => ipcRenderer.invoke('relay:tasks'),
   deleteTask: (taskId: string) => ipcRenderer.invoke('relay:delete-task', { taskId }),
+  deletePublication: (taskId: string, runId: string) => ipcRenderer.invoke('relay:delete-publication', { taskId, runId }),
   importArticle: (url: string) => ipcRenderer.invoke('relay:import', { url }),
   importTask: (taskId: string, refresh = false) => ipcRenderer.invoke('relay:import', { taskId, refresh }),
   readArticle: (taskId: string) => ipcRenderer.invoke('relay:read', { taskId }),
@@ -18,6 +19,7 @@ contextBridge.exposeInMainWorld('relay', {
   hideBrowser: () => ipcRenderer.invoke('relay:hide-browser'),
   publishArticle: (taskId: string, platform?: 'zhihu' | 'weibo') =>
     ipcRenderer.invoke('relay:publish', platform ? { taskId, platform } : { taskId }),
+  publishAll: (taskId: string) => ipcRenderer.invoke('relay:publish-all', { taskId }),
   showArticle: (taskId: string, runId: string) => ipcRenderer.invoke('relay:show-article', { taskId, runId }),
   markPublished: (taskId: string, runId: string, url?: string) =>
     ipcRenderer.invoke('relay:mark-published', url ? { taskId, runId, url } : { taskId, runId }),

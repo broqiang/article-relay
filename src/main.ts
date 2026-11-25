@@ -3,8 +3,8 @@ import { randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
-import { chromiumUserAgent } from './browser.js'
-import { errorMessage, platformNames, TaskStore, type Platform, type SyncRun, type Task } from './tasks.js'
+import { chromiumUserAgent, publicationUrlStatus } from './browser.js'
+import { blockingPublication, clearPublishedRun, errorMessage, platformNames, publishMissingPlatforms, TaskStore, type Platform, type SyncRun, type Task } from './tasks.js'
 import { inspectWeChatScript, wechatArticleUrl, type PageResult } from './wechat.js'
 import { Weibo, findWeiboPublishedUrl, isWeiboSsoCallback, weiboArticleUrl, weiboDraftUrl, weiboEditor, weiboHistoryUrl, weiboHome, type WeiboAccount } from './weibo.js'
 import { checkWeiboArticle, publishWeiboDraft } from './weibo-publish.js'
@@ -15,10 +15,12 @@ const workspaceUrl = 'relay://workspace/index.html'
 const zhihuLoginUrl = 'https://www.zhihu.com/signin'
 const releasesUrl = 'https://github.com/broqiang/article-relay/releases'
 const workspaceAssets = new Map([
-  ['/index.html', 'text/html'],
-  ['/styles.css', 'text/css'],
-  ['/app.js', 'text/javascript'],
-  ['/icon.svg', 'image/svg+xml'],
+  ['/index.html', 'text/html; charset=utf-8'],
+  ['/styles.css', 'text/css; charset=utf-8'],
+  ['/app.js', 'text/javascript; charset=utf-8'],
+  ['/icon.svg', 'image/svg+xml; charset=utf-8'],
+  ['/zhihu.ico', 'image/vnd.microsoft.icon'],
+  ['/weibo.ico', 'image/vnd.microsoft.icon'],
 ])
 
 protocol.registerSchemesAsPrivileged([{
@@ -33,9 +35,9 @@ function serveWorkspace(): void {
     if (request.method !== 'GET' || url.host !== 'workspace' || !type) {
       return new Response(null, { status: 404 })
     }
-    const body = await readFile(join(__dirname, '..', 'ui', url.pathname.slice(1)), 'utf8')
+    const body = await readFile(join(__dirname, '..', 'ui', url.pathname.slice(1)))
     return new Response(body, {
-      headers: { 'Content-Type': `${type}; charset=utf-8` },
+      headers: { 'Content-Type': type },
     })
   })
 }
@@ -292,11 +294,10 @@ async function createWindow(): Promise<void> {
     await updateTask(taskId, { runs: [run, ...other] })
   }
 
-  function assertCanPublish(task: Task, platform: Platform, owner: string): void {
-    const prior = task.runs.find((run) => run.platform === platform && run.owner === owner &&
-      ['publishing', 'published', 'publish-uncertain'].includes(run.state))
+  function assertCanPublish(task: Task, platform: Platform): void {
+    const prior = blockingPublication(task.runs, platform)
     const name = platformNames[platform]
-    if (prior?.state === 'published') throw new Error(`这篇文章已用当前${name}账号发布，可在同步记录中查看。`)
+    if (prior?.state === 'published') throw new Error(`这篇文章已发布到${name}，可在该平台的记录中查看。`)
     if (prior) throw new Error(`上一次发布的结果尚未确认，请先在${name}核对。`)
   }
 
@@ -358,8 +359,35 @@ async function createWindow(): Promise<void> {
     return { url }
   }
 
+  async function deletePublication(task: Task, runId?: string): Promise<void> {
+    const run = articleRun(task, runId)
+    if (run.state !== 'published') throw new Error('请先核对线上发布结果。')
+    const name = platformNames[run.platform]
+    const adapter = run.platform === 'weibo' ? weibo : zhihu
+    const requireOwner = async () => {
+      if ((await adapter.account())?.id !== run.owner) throw new Error(`请先登录当时发布文章的${name}账号。`)
+    }
+    progress(task.id, `正在核对${name}线上文章…`)
+    await requireOwner()
+    const url = run.platform === 'weibo'
+      ? weiboArticleUrl(run.publishedUrl ?? '') || (await checkWeiboHistory(run))?.url
+      : articleUrl(run.draftId)
+    if (!url) throw new Error('没有可核对的微博文章链接，请先补录链接。')
+    const siteSession = run.platform === 'weibo' ? weiboSession : zhihuSession
+    if (await publicationUrlStatus((address, init) => siteSession.fetch(address, init), url) !== 'missing') {
+      const exists = run.platform === 'weibo'
+        ? await checkWeiboArticle(weiboView.webContents, url, run.articleTitle ?? '', run.owner)
+        : await checkZhihuArticle(zhihuView.webContents, run.draftId)
+      throw new Error(exists
+        ? `${name}文章仍在线，请先到${name}删除文章。`
+        : `暂时无法确认${name}文章已删除。请核对线上文章后重试。`)
+    }
+    await requireOwner()
+    await updateTask(task.id, { runs: clearPublishedRun(task.runs, run) })
+  }
+
   async function publishSaved(taskId: string, run: SyncRun & { draftId: string }) {
-    assertCanPublish(tasks.get(taskId), run.platform, run.owner)
+    assertCanPublish(tasks.get(taskId), run.platform)
     await writeRun(taskId, { ...run, state: 'publishing', finishedAt: undefined, error: undefined })
     const name = platformNames[run.platform]
     progress(taskId, `正在提交${name}文章…`)
@@ -405,10 +433,70 @@ async function createWindow(): Promise<void> {
     return { publishNotice: error }
   }
 
-  function serial<T>(work: () => Promise<T>): Promise<T> {
-    if (busy) return Promise.reject(new Error('请等当前操作完成。'))
+  async function serial<T>(work: () => Promise<T>): Promise<T> {
+    if (busy) throw new Error('请等当前操作完成。')
     busy = true
-    return work().finally(() => { busy = false })
+    try {
+      return await work()
+    } finally {
+      busy = false
+    }
+  }
+
+  async function publishArticle(task: Task, platform: Platform) {
+    const article = task.article
+    if (!article || task.importState !== 'ready') throw new Error('请先完成公众号文章导入。')
+    assertCanPublish(task, platform)
+    const name = platformNames[platform]
+    const startedAt = new Date().toISOString()
+    const base: SyncRun = { id: randomUUID(), platform, owner: '', account: '账号未确认', startedAt, state: 'running' }
+    progress(task.id, `正在检查${name}登录状态…`)
+    let account
+    try {
+      account = await (platform === 'weibo' ? weibo : zhihu).account()
+    } catch (error) {
+      await writeRun(task.id, { ...base, finishedAt: new Date().toISOString(), state: 'failed', error: errorMessage(error) })
+      throw error
+    }
+    if (!account) {
+      await writeRun(task.id, { ...base, finishedAt: new Date().toISOString(), state: 'failed', error: `请先在应用内登录${name}。` })
+      return { loginRequired: true }
+    }
+    const owned = task.runs.filter((run) => run.platform === platform && run.owner === account.id && run.draftId && !run.draftMissing)
+    const existing = owned[0]?.draftId
+    const saved = owned.find((run) => run.draftId === existing && run.state === 'saved')
+    if (existing && saved) return publishSaved(task.id, { ...saved, draftId: existing })
+
+    let run: SyncRun = { ...base, owner: account.id, account: account.name, draftId: existing, articleTitle: article.title }
+    await writeRun(task.id, run)
+    let draftId: string
+    try {
+      const readImage = (url: string) => tasks.readImage(task.id, url)
+      const uploading = (index: number, total: number) => {
+        progress(task.id, `正在上传本地原图 ${index}/${total}…`)
+      }
+      const saveProgress = async (id?: string) => {
+        const missingId = !id ? run.draftId : undefined
+        run = { ...run, draftId: id }
+        await writeRun(task.id, run, missingId)
+        if (missingId) progress(task.id, `原草稿已失效，正在新建${name}草稿…`)
+      }
+      if (platform === 'weibo') {
+        const content = await weibo.prepareContent(account.id, article, readImage, uploading)
+        progress(task.id, '正在保存微博草稿…')
+        draftId = await weibo.saveDraft(account.id, article.title, content, existing, saveProgress)
+      } else {
+        const content = await zhihu.prepareContent(article, readImage, uploading)
+        progress(task.id, '正在保存知乎草稿…')
+        draftId = await zhihu.saveDraft(article.title, content, existing, saveProgress)
+      }
+    } catch (error) {
+      await writeRun(task.id, { ...run, state: 'failed', error: errorMessage(error), finishedAt: new Date().toISOString() })
+      throw error
+    }
+    const savedRun: SyncRun & { draftId: string } = { ...run, draftId, state: 'saved', finishedAt: new Date().toISOString() }
+    await writeRun(task.id, savedRun)
+    return publishSaved(task.id, savedRun)
   }
 
   const handlers = {
@@ -456,6 +544,7 @@ async function createWindow(): Promise<void> {
       return { name: (await adapter.account())?.name ?? null }
     },
     'relay:tasks': () => tasks.list(),
+    'relay:delete-publication': (action?: Action) => serial(() => deletePublication(selectedTask(action), action?.runId)),
     'relay:delete-task': (action?: Action) => serial(async () => {
       const task = selectedTask(action)
       const result = await tasks.delete(task.id)
@@ -508,8 +597,14 @@ async function createWindow(): Promise<void> {
         show(weiboView, '微博草稿编辑器')
         return
       }
-      show(zhihuView, '知乎草稿编辑器')
       await zhihuView.webContents.loadURL(draftUrl(run.draftId))
+      if (run.state === 'saved') {
+        await writeRun(task.id, {
+          ...run, state: 'publish-uncertain', manualHandoff: true,
+          error: '已交给知乎编辑器处理。请在知乎核对文章状态。',
+        })
+      }
+      show(zhihuView, '知乎草稿编辑器')
     }),
     'relay:show-article': (action?: Action) => serial(async () => {
       const task = selectedTask(action)
@@ -559,62 +654,10 @@ async function createWindow(): Promise<void> {
       }
       return run.state === 'published' ? { publishedUrl: articleUrl(run.draftId) } : recordPublished(task.id, run)
     }),
-    'relay:publish': (action?: Action) => serial(async () => {
-      const task = selectedTask(action)
-      const article = task.article
-      if (!article || task.importState !== 'ready') throw new Error('请先完成公众号文章导入。')
-      const platform = publicationPlatform(action)
-      const name = platformNames[platform]
-      const startedAt = new Date().toISOString()
-      const base: SyncRun = { id: randomUUID(), platform, owner: '', account: '账号未确认', startedAt, state: 'running' }
-      progress(task.id, `正在检查${name}登录状态…`)
-      let account
-      try {
-        account = await (platform === 'weibo' ? weibo : zhihu).account()
-      } catch (error) {
-        await writeRun(task.id, { ...base, finishedAt: new Date().toISOString(), state: 'failed', error: errorMessage(error) })
-        throw error
-      }
-      if (!account) {
-        await writeRun(task.id, { ...base, finishedAt: new Date().toISOString(), state: 'failed', error: `请先在应用内登录${name}。` })
-        return { loginRequired: true }
-      }
-      assertCanPublish(task, platform, account.id)
-      const owned = task.runs.filter((run) => run.platform === platform && run.owner === account.id && run.draftId && !run.draftMissing)
-      const existing = owned[0]?.draftId
-      const saved = owned.find((run) => run.draftId === existing && run.state === 'saved')
-      if (existing && saved) return publishSaved(task.id, { ...saved, draftId: existing })
-
-      let run: SyncRun = { ...base, owner: account.id, account: account.name, draftId: existing, articleTitle: article.title }
-      await writeRun(task.id, run)
-      let draftId: string
-      try {
-        const readImage = (url: string) => tasks.readImage(task.id, url)
-        const uploading = (index: number, total: number) => {
-          progress(task.id, `正在上传本地原图 ${index}/${total}…`)
-        }
-        const saveProgress = async (id?: string) => {
-          const missingId = !id ? run.draftId : undefined
-          run = { ...run, draftId: id }
-          await writeRun(task.id, run, missingId)
-          if (missingId) progress(task.id, `原草稿已失效，正在新建${name}草稿…`)
-        }
-        if (platform === 'weibo') {
-          const content = await weibo.prepareContent(account.id, article, readImage, uploading)
-          progress(task.id, '正在保存微博草稿…')
-          draftId = await weibo.saveDraft(account.id, article.title, content, existing, saveProgress)
-        } else {
-          const content = await zhihu.prepareContent(article, readImage, uploading)
-          progress(task.id, '正在保存知乎草稿…')
-          draftId = await zhihu.saveDraft(article.title, content, existing, saveProgress)
-        }
-      } catch (error) {
-        await writeRun(task.id, { ...run, state: 'failed', error: errorMessage(error), finishedAt: new Date().toISOString() })
-        throw error
-      }
-      const savedRun: SyncRun & { draftId: string } = { ...run, draftId, state: 'saved', finishedAt: new Date().toISOString() }
-      await writeRun(task.id, savedRun)
-      return publishSaved(task.id, savedRun)
+    'relay:publish': (action?: Action) => serial(() => publishArticle(selectedTask(action), publicationPlatform(action))),
+    'relay:publish-all': (action?: Action) => serial(() => {
+      const { id } = selectedTask(action)
+      return publishMissingPlatforms(() => tasks.get(id), publishArticle)
     }),
   }
 
@@ -641,9 +684,7 @@ async function createWindow(): Promise<void> {
     if (document.documentElement.dataset.relayReady === 'true') {
       true
     } else {
-      for (const id of ['account-name', 'weibo-account-name']) {
-        document.getElementById(id).textContent = '应用界面启动失败'
-      }
+      document.getElementById('account-summary').textContent = '应用界面启动失败'
       document.getElementById('status').textContent = '界面未能加载，请查看启动终端中的错误信息。'
       document.getElementById('status').classList.add('error')
       false

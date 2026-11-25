@@ -28,6 +28,17 @@ export interface SyncRun {
   error?: string
 }
 
+export function blockingPublication(runs: SyncRun[], platform: Platform): SyncRun | undefined {
+  return runs.find((run) => run.platform === platform && run.state === 'published') ??
+    runs.find((run) => run.platform === platform && ['publishing', 'publish-uncertain'].includes(run.state))
+}
+
+export function clearPublishedRun(runs: SyncRun[], publication: SyncRun): SyncRun[] {
+  return runs.filter((run) => run.id !== publication.id &&
+    !(run.platform === publication.platform && run.owner === publication.owner &&
+      run.draftId === publication.draftId && run.state !== 'published' && run.state !== 'publish-uncertain'))
+}
+
 interface LocalImage {
   url: string
   name: string
@@ -54,6 +65,35 @@ export interface Task {
   importState: ImportState
   importDetail: string
   runs: SyncRun[]
+}
+
+type BatchState = 'published' | 'already-published' | 'login-required' | 'needs-check' | 'failed'
+
+export async function publishMissingPlatforms(
+  getTask: () => Task,
+  publish: (task: Task, platform: Platform) => Promise<{ published?: boolean; loginRequired?: boolean; publishNotice?: string }>,
+): Promise<{ platform: Platform; state: BatchState; detail?: string }[]> {
+  const task = getTask()
+  if (task.importState !== 'ready' || !task.article) throw new Error('请先完成公众号文章导入。')
+  const outcomes: { platform: Platform; state: BatchState; detail?: string }[] = []
+  for (const platform of Object.keys(platformNames) as Platform[]) {
+    const current = getTask()
+    const prior = blockingPublication(current.runs, platform)
+    if (prior) {
+      outcomes.push({ platform, state: prior.state === 'published' ? 'already-published' : 'needs-check' })
+      continue
+    }
+    try {
+      const result = await publish(current, platform)
+      const state = result.published ? 'published' : result.loginRequired ? 'login-required' :
+        blockingPublication(getTask().runs, platform) ? 'needs-check' : 'failed'
+      outcomes.push({ platform, state, detail: result.publishNotice })
+    } catch (error) {
+      const pending = blockingPublication(getTask().runs, platform)
+      outcomes.push({ platform, state: pending ? 'needs-check' : 'failed', detail: errorMessage(error) })
+    }
+  }
+  return outcomes
 }
 
 type ImageRequest = (url: string, init: RequestInit) => Promise<Response>
