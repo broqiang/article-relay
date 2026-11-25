@@ -4,7 +4,13 @@ import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { chromiumUserAgent, publicationUrlStatus } from './browser.js'
-import { blockingPublication, clearPublishedRun, errorMessage, platformNames, publishMissingPlatforms, TaskStore, type Platform, type SyncRun, type Task } from './tasks.js'
+import { monitorJuejinAudits } from './juejin-audit.js'
+import { Juejin, juejinArticleId, juejinArticles, juejinArticleUrl, juejinDefaultsRequired, juejinDraftUrl, juejinHome, juejinId,
+  juejinReviewUrl, parseJuejinDefaults, type JuejinDefaults, type JuejinPublicationStatus } from './juejin.js'
+import { juejinMarkdown } from './juejin-markdown.js'
+import { publishJuejinDraft } from './juejin-publish.js'
+import { monitorJuejinPublishResponse, type JuejinPublishDiagnostic } from './juejin-publish-response.js'
+import { blockingPublication, canCheckJuejinAudit, canOpenDraft, clearPublishedRun, errorMessage, platformNames, publishMissingPlatforms, TaskStore, type Platform, type SyncRun, type Task } from './tasks.js'
 import { inspectWeChatScript, wechatArticleUrl, type PageResult } from './wechat.js'
 import { Weibo, findWeiboPublishedUrl, isWeiboSsoCallback, weiboArticleUrl, weiboDraftUrl, weiboEditor, weiboHistoryUrl, weiboHome, type WeiboAccount } from './weibo.js'
 import { checkWeiboArticle, publishWeiboDraft } from './weibo-publish.js'
@@ -12,12 +18,15 @@ import { articleUrl, draftUrl, Zhihu } from './zhihu.js'
 import { checkZhihuArticle, publishZhihuDraft, type PublishResult } from './zhihu-publish.js'
 
 const workspaceUrl = 'relay://workspace/index.html'
+const helpUrl = 'relay://workspace/help.html'
 const zhihuLoginUrl = 'https://www.zhihu.com/signin'
+const zhihuOrigins = ['https://www.zhihu.com', 'https://zhuanlan.zhihu.com']
 const repositoryUrl = 'https://github.com/broqiang/article-relay'
 const releasesUrl = `${repositoryUrl}/releases`
 const latestReleaseUrl = 'https://api.github.com/repos/broqiang/article-relay/releases/latest'
 const workspaceAssets = new Map([
   ['/index.html', 'text/html; charset=utf-8'],
+  ['/help.html', 'text/html; charset=utf-8'],
   ['/styles.css', 'text/css; charset=utf-8'],
   ['/app.js', 'text/javascript; charset=utf-8'],
   ['/icon.svg', 'image/svg+xml; charset=utf-8'],
@@ -25,6 +34,7 @@ const workspaceAssets = new Map([
   ['/button-icons.svg', 'image/svg+xml; charset=utf-8'],
   ['/zhihu.ico', 'image/vnd.microsoft.icon'],
   ['/weibo.ico', 'image/vnd.microsoft.icon'],
+  ['/juejin.ico', 'image/vnd.microsoft.icon'],
 ])
 
 async function hasUpdate(currentVersion: string): Promise<boolean> {
@@ -120,12 +130,17 @@ interface Action {
   refresh?: boolean
   platform?: Platform
   settingsOpen?: boolean
+  openOnly?: boolean
+  returnFromDraft?: boolean
+  owner?: string
+  query?: string
+  defaults?: unknown
 }
 
 async function createWindow(): Promise<void> {
   const tasks = await TaskStore.open(app.getPath('userData'))
   const window = new BrowserWindow({
-    width: 1160, height: 800, minWidth: 900, minHeight: 660,
+    width: 1280, height: 840, minWidth: 900, minHeight: 660,
     backgroundColor: '#f3f5f9', autoHideMenuBar: true,
     webPreferences: { preload: join(__dirname, 'preload.js'), sandbox: true, contextIsolation: true },
   })
@@ -141,7 +156,7 @@ async function createWindow(): Promise<void> {
   const wechatSession = session.fromPartition('persist:wechat')
   const sourceView = siteView(wechatSession, ['https://mp.weixin.qq.com'])
   const zhihuSession = session.fromPartition('persist:zhihu')
-  const zhihuView = siteView(zhihuSession, ['https://www.zhihu.com', 'https://zhuanlan.zhihu.com'], false)
+  const zhihuView = siteView(zhihuSession, zhihuOrigins, false)
   const zhihu = new Zhihu((url, init) => zhihuSession.fetch(url, init))
   const weiboSession = session.fromPartition('persist:weibo')
   const weiboView = siteView(weiboSession, [
@@ -149,12 +164,26 @@ async function createWindow(): Promise<void> {
     'https://passport.weibo.com', 'https://login.sina.com.cn', 'https://security.weibo.com',
   ], false, isWeiboSsoCallback)
   const weibo = new Weibo((url, init) => weiboSession.fetch(url, init))
+  const juejinSession = session.fromPartition('persist:juejin')
+  const juejinView = siteView(juejinSession, [new URL(juejinHome).origin], false)
+  const juejin = new Juejin((url, init) => juejinSession.fetch(url, init))
+  let observeJuejinDispatch: (() => void) | undefined
+  juejinSession.webRequest.onBeforeRequest({ urls: ['https://api.juejin.cn/content_api/v1/article/publish*'] }, (details, callback) => {
+    if (details.webContentsId === juejinView.webContents.id && details.method === 'POST' &&
+        new URL(details.url).pathname === '/content_api/v1/article/publish') observeJuejinDispatch?.()
+    callback({})
+  })
+  const publicationSites = { zhihu, weibo, juejin }
+  const publicationSessions = { zhihu: zhihuSession, weibo: weiboSession, juejin: juejinSession }
   let activeView: WebContentsView | undefined
+  let activeDraft: { taskId: string; runId: string } | undefined
+  let zhihuDraftCheckView: WebContentsView | undefined
   let settingsOpen = false
   let activeLabel = ''
   let sourceTask: string | undefined
   let busy = false
   let weiboAccountWatch: AbortController | undefined
+  const juejinAuditMonitor = monitorJuejinAudits(checkJuejinAudit)
 
   function resizeBrowser(view = activeView): void {
     const [width, height] = window.getContentSize()
@@ -162,7 +191,7 @@ async function createWindow(): Promise<void> {
     view?.setBounds({ x: 340, y: 132, width: Math.max(1, width - 364), height: Math.max(1, height - 156) })
   }
 
-  function show(view?: WebContentsView, label = ''): void {
+  function show(view?: WebContentsView, label = '', draft?: typeof activeDraft): void {
     if (window.isDestroyed()) return
     if (view !== weiboView) {
       weiboAccountWatch?.abort()
@@ -178,6 +207,7 @@ async function createWindow(): Promise<void> {
       resizeBrowser()
     }
     activeLabel = label
+    activeDraft = draft
     window.webContents.send('relay:browser', label)
     if (view === weiboView) watchWeiboAccount()
   }
@@ -264,7 +294,10 @@ async function createWindow(): Promise<void> {
   }
 
   function notifyTasks(selected?: string): void {
-    if (!window.isDestroyed()) window.webContents.send('relay:tasks-changed', tasks.list(), selected)
+    if (window.isDestroyed()) return
+    const list = tasks.list()
+    window.webContents.send('relay:tasks-changed', list, selected)
+    syncJuejinAudits(list)
   }
 
   async function updateTask(id: string, changes: Partial<Omit<Task, 'id' | 'updatedAt'>>): Promise<void> {
@@ -341,8 +374,8 @@ async function createWindow(): Promise<void> {
   }
 
   function publicationPlatform(action?: Action): Platform {
-    if (action?.platform === undefined || action.platform === 'zhihu') return 'zhihu'
-    if (action.platform === 'weibo') return 'weibo'
+    if (action?.platform === undefined) return 'zhihu'
+    if (Object.hasOwn(platformNames, action.platform)) return action.platform
     throw new Error('不支持的发布平台。')
   }
 
@@ -398,25 +431,115 @@ async function createWindow(): Promise<void> {
     return { url }
   }
 
+  function syncJuejinAudits(list = tasks.list()): void {
+    juejinAuditMonitor.sync(list.flatMap(({ id: taskId }) => tasks.get(taskId).runs.filter(canCheckJuejinAudit)
+      .map(({ id: runId }) => ({ taskId, runId }))))
+  }
+
+  async function checkJuejinAudit({ taskId, runId }: { taskId: string; runId: string }): Promise<void> {
+    const pending = () => tasks.get(taskId).runs.filter(canCheckJuejinAudit).find((run) => run.id === runId)
+    if (busy || window.isDestroyed()) return
+    const run = pending()
+    if (!run) return
+    const checked = await juejin.publicationStatus(run.draftId, run.owner, run.articleId)
+    if (busy || window.isDestroyed()) return
+    await serial(async () => {
+      const current = pending()
+      if (current === run) await applyJuejinAuditResult(taskId, current, checked)
+    })
+  }
+
+  function juejinAuditNotice(checked: JuejinPublicationStatus, run: SyncRun): string | undefined {
+    const audit = checked.audit ?? run.juejinAudit
+    if (audit === 'reviewing') return '掘金已接收文章，正在审核。'
+    if (audit === 'rejected') return '掘金审核未通过，可在创作者中心查看原因。'
+    if (checked.status) return `掘金发布状态为「${checked.status}」，可在创作者中心核对。`
+  }
+
+  async function applyJuejinAuditResult(taskId: string, run: SyncRun & { draftId: string }, checked: JuejinPublicationStatus) {
+    if (checked.url) return recordPublished(taskId, { ...run, articleId: checked.id, juejinAudit: undefined }, checked.url)
+    const updated = {
+      ...run, articleId: checked.id ?? run.articleId, juejinAudit: checked.audit ?? run.juejinAudit,
+      error: juejinAuditNotice(checked, run) ?? run.error,
+    }
+    if (updated.articleId !== run.articleId || updated.juejinAudit !== run.juejinAudit || updated.error !== run.error) {
+      await writeRun(taskId, updated)
+    }
+  }
+
+  async function stopJuejinAutoCheck(taskId: string, run: SyncRun & { draftId: string }) {
+    if (run.juejinAutoCheckStopped) return run
+    const stopped = { ...run, juejinAutoCheckStopped: true }
+    await writeRun(taskId, stopped)
+    return stopped
+  }
+
+  async function refreshPublication(taskId: string, run: SyncRun & { draftId: string }, manual: boolean) {
+    if (run.platform === 'juejin') {
+      const current = manual ? await stopJuejinAutoCheck(taskId, run) : run
+      const checked = await juejin.publicationStatus(run.draftId, run.owner, run.articleId)
+      const published = await applyJuejinAuditResult(taskId, current, checked)
+      return published ?? { checkNotice: juejinAuditNotice(checked, current) ?? '暂未核实发布结果，可以打开掘金页面查看进度。' }
+    }
+    if (run.platform === 'weibo') {
+      const confirmed = await checkWeiboHistory(run)
+      if (confirmed && (confirmed.url || run.state === 'publish-uncertain')) {
+        return recordPublished(taskId, run, confirmed.url)
+      }
+      return { checkNotice: run.state === 'published' ? '文章已发布，暂未匹配到公开链接。可打开微博发布记录查看。' :
+        '暂未核实发布结果，可以打开微博文章管理查看。' }
+    }
+    const view = manual ? zhihuView : (zhihuDraftCheckView ??= siteView(zhihuSession, zhihuOrigins, false))
+    if (await checkZhihuArticle(view.webContents, run.draftId, manual ? undefined : 3_000)) return recordPublished(taskId, run)
+    return { checkNotice: '暂未核实知乎发布结果，可以打开文章链接查看。' }
+  }
+
+  async function refreshAfterDraft({ taskId, runId }: NonNullable<typeof activeDraft>): Promise<void> {
+    for (const wait of [0, 5_000]) {
+      if (wait) await delay(wait, undefined, { ref: false })
+      if (window.isDestroyed() || activeView || busy) continue
+      const run = tasks.get(taskId).runs.find((item) => item.id === runId)
+      const draftId = run?.draftId
+      if (!draftId || !run || run.draftMissing || run.juejinAudit ||
+          (run.state !== 'publish-uncertain' && !(run.platform === 'weibo' && run.state === 'published' && !run.publishedUrl))) return
+      await serial(() => refreshPublication(taskId, { ...run, draftId }, false)).catch(() => {})
+    }
+  }
+
   async function deletePublication(task: Task, runId?: string): Promise<void> {
+    const local = task.runs.find((run) => run.id === runId)
+    if (local?.platform === 'juejin' && local.state !== 'published') {
+      await tasks.clearJuejinPublicationHistory(task.id, local.id)
+      notifyTasks()
+      return
+    }
     const run = articleRun(task, runId)
     if (run.state !== 'published') throw new Error('请先核对线上发布结果。')
     const name = platformNames[run.platform]
-    const adapter = run.platform === 'weibo' ? weibo : zhihu
+    const adapter = publicationSites[run.platform]
     const requireOwner = async () => {
       if ((await adapter.account())?.id !== run.owner) throw new Error(`请先登录当时发布文章的${name}账号。`)
     }
     progress(task.id, `正在核对${name}线上文章…`)
     await requireOwner()
-    const url = run.platform === 'weibo'
-      ? weiboArticleUrl(run.publishedUrl ?? '') || (await checkWeiboHistory(run))?.url
-      : articleUrl(run.draftId)
-    if (!url) throw new Error('没有可核对的微博文章链接，请先补录链接。')
-    const siteSession = run.platform === 'weibo' ? weiboSession : zhihuSession
-    if (await publicationUrlStatus((address, init) => siteSession.fetch(address, init), url) !== 'missing') {
+    let url: string | undefined
+    if (run.platform === 'weibo') url = weiboArticleUrl(run.publishedUrl ?? '') || (await checkWeiboHistory(run))?.url
+    if (run.platform === 'zhihu') url = articleUrl(run.draftId)
+    if (run.platform === 'juejin') {
+      const id = juejinArticleId(run.publishedUrl ?? '')
+      if (id) url = juejinArticleUrl(id)
+    }
+    if (!url) throw new Error(run.platform === 'weibo' ? '没有可核对的微博文章链接，请先补录链接。' :
+      `没有可核对的${name}文章链接，请先核对发布结果。`)
+    const siteSession = publicationSessions[run.platform]
+    const missing = run.platform === 'juejin' ? await juejin.articleMissing(juejinArticleId(url)!) :
+      await publicationUrlStatus((address, init) => siteSession.fetch(address, init), url) === 'missing'
+    if (!missing) {
       const exists = run.platform === 'weibo'
         ? await checkWeiboArticle(weiboView.webContents, url, run.articleTitle ?? '', run.owner)
-        : await checkZhihuArticle(zhihuView.webContents, run.draftId)
+        : run.platform === 'juejin'
+          ? await juejin.publicArticle(juejinArticleId(url)!, run.draftId).catch(() => false)
+          : await checkZhihuArticle(zhihuView.webContents, run.draftId)
       throw new Error(exists
         ? `${name}文章仍在线，请先到${name}删除文章。`
         : `暂时无法确认${name}文章已删除。请核对线上文章后重试。`)
@@ -425,12 +548,78 @@ async function createWindow(): Promise<void> {
     await updateTask(task.id, { runs: clearPublishedRun(task.runs, run) })
   }
 
-  async function publishSaved(taskId: string, run: SyncRun & { draftId: string }) {
+  async function publishSavedJuejin(taskId: string, run: SyncRun & { draftId: string }, defaults?: JuejinDefaults) {
+    const manual = async (reason: string) => {
+      const notice = `${reason}草稿已保留，可打开掘金编辑器继续。`
+      await writeRun(taskId, { ...run, state: 'saved', error: notice, finishedAt: new Date().toISOString() })
+      return { saved: true, publishNotice: notice }
+    }
+    const account = await juejin.account().catch(() => undefined)
+    if (account?.id !== run.owner) return manual('暂时无法确认保存草稿的掘金账号。')
+    const draft = await juejin.draft(run.draftId, run.owner).catch(() => undefined)
+    if (draft === null && !run.articleId) {
+      const article = await juejin.findArticle(run.draftId, run.owner).catch(() => undefined)
+      if (article) return finishJuejinSubmission(taskId, { ...run, articleId: article.id })
+      const notice = '掘金草稿已失效。再次发布时会新建草稿。'
+      await writeRun(taskId, { ...run, state: 'failed', draftMissing: true, error: notice, finishedAt: new Date().toISOString() }, run.draftId)
+      return { publishNotice: notice }
+    }
+
+    let articleId = run.articleId
+    let diagnostic: JuejinPublishDiagnostic | undefined
+    if (!articleId && juejinId(draft?.article_id)) articleId = draft.article_id
+    if (!articleId) {
+      if (account.canPublish === false) return manual('请先按掘金要求完成手机验证。')
+      const title = run.articleTitle ?? tasks.get(taskId).article?.title
+      if (!title) return manual('缺少用于核对掘金草稿的标题。')
+      resizeBrowser(juejinView)
+      let dispatched = false
+      observeJuejinDispatch = () => { dispatched = true }
+      const response = monitorJuejinPublishResponse(juejinView.webContents.debugger, run.draftId)
+      const submission = await publishJuejinDraft(juejinView.webContents, run.draftId, { owner: account.id, title, defaults },
+        { beforeConfirm: response.start, submissionRejected: () => response.diagnostic()?.rejected === true }).finally(() => {
+        observeJuejinDispatch = undefined
+        response.close()
+      })
+      if (!submission.submitted) {
+        const reasons = {
+          'missing-defaults': juejinDefaultsRequired,
+          'invalid-defaults': '掘金发布默认值已失效，请重新选择分类或标签。',
+          'wrong-draft': '未能核对掘金草稿的标题、账号或发布状态。',
+          verification: '请先按掘金要求完成手机验证。',
+          incomplete: '掘金草稿的正文或发布设置未满足提交要求，请检查摘要等必填项。',
+        }
+        const reason = submission.reason
+        const notice = reason && reason in reasons ? reasons[reason as keyof typeof reasons] : '暂时无法在掘金编辑器核对草稿或提交。'
+        return manual(notice)
+      }
+      articleId = submission.articleId
+      if (!articleId) diagnostic = response.diagnostic() ?? { notice: dispatched ? '掘金编辑器已发起发布请求，暂未核实平台结果。' :
+        '掘金编辑器尚未观察到发布请求，可打开草稿查看。' }
+    }
+    return finishJuejinSubmission(taskId, { ...run, articleId }, diagnostic)
+  }
+
+  async function finishJuejinSubmission(taskId: string, run: SyncRun & { draftId: string }, diagnostic?: JuejinPublishDiagnostic) {
+    progress(taskId, '正在核对掘金发布结果…')
+    const checked = await juejin.publicationStatus(run.draftId, run.owner, run.articleId)
+    if (checked.url) return recordPublished(taskId, { ...run, articleId: checked.id }, checked.url)
+    const saved = diagnostic?.rejected === true && !checked.id && !run.articleId
+    const notice = juejinAuditNotice(checked, run) ?? diagnostic?.notice ?? '掘金发布结果待核对，可在创作者中心查看进度。'
+    await writeRun(taskId, {
+      ...run, articleId: checked.id ?? run.articleId, juejinAudit: checked.audit, state: saved ? 'saved' : 'publish-uncertain',
+      error: notice, finishedAt: new Date().toISOString(),
+    })
+    return { saved, publishNotice: notice, reviewing: checked.audit === 'reviewing' }
+  }
+
+  async function publishSaved(taskId: string, run: SyncRun & { draftId: string }, defaults?: JuejinDefaults) {
     assertCanPublish(tasks.get(taskId), run.platform)
     await writeRun(taskId, { ...run, state: 'publishing', finishedAt: undefined, error: undefined })
     const name = platformNames[run.platform]
     progress(taskId, `正在提交${name}文章…`)
     show()
+    if (run.platform === 'juejin') return publishSavedJuejin(taskId, run, defaults)
     let result: PublishResult
     let manualReason: string | undefined
     try {
@@ -463,13 +652,14 @@ async function createWindow(): Promise<void> {
       result = 'uncertain'
     }
     if (result === 'published') return recordPublished(taskId, run)
-    const error = result === 'manual'
-      ? `${manualReason ?? '未能自动提交。'}草稿已保留，你可以打开草稿，在${name}编辑器中检查并发布。`
-      : `${name}发布结果尚未确认。请在${name}核对文章状态，避免重复发布。`
+    const saved = result === 'manual' || result === 'rate-limited'
+    const error = result === 'rate-limited' ? '知乎提示近期发布频率过高，请在 24 小时后重试。草稿已保留，可打开草稿。' :
+      saved ? `${manualReason ?? '未能自动提交。'}草稿已保留，你可以打开草稿，在${name}编辑器中检查并发布。` :
+        `${name}发布结果尚未确认。请在${name}核对文章状态，避免重复发布。`
     await writeRun(taskId, {
-      ...run, state: result === 'manual' ? 'saved' : 'publish-uncertain', finishedAt: new Date().toISOString(), error,
+      ...run, state: saved ? 'saved' : 'publish-uncertain', finishedAt: new Date().toISOString(), error,
     })
-    return { publishNotice: error }
+    return result === 'rate-limited' ? { saved: true, publishNotice: error } : { publishNotice: error }
   }
 
   async function serial<T>(work: () => Promise<T>): Promise<T> {
@@ -492,7 +682,7 @@ async function createWindow(): Promise<void> {
     progress(task.id, `正在检查${name}登录状态…`)
     let account
     try {
-      account = await (platform === 'weibo' ? weibo : zhihu).account()
+      account = await publicationSites[platform].account()
     } catch (error) {
       await writeRun(task.id, { ...base, finishedAt: new Date().toISOString(), state: 'failed', error: errorMessage(error) })
       throw error
@@ -501,10 +691,13 @@ async function createWindow(): Promise<void> {
       await writeRun(task.id, { ...base, finishedAt: new Date().toISOString(), state: 'failed', error: `请先在应用内登录${name}。` })
       return { loginRequired: true }
     }
+    const configured = platform === 'juejin' ? await tasks.juejinDefaults(account.id) : undefined
+    const tagLimit = 'tagLimit' in account && typeof account.tagLimit === 'number' ? account.tagLimit : undefined
+    const defaults = configured ? await juejin.validateDefaults(configured, tagLimit) : undefined
     const owned = task.runs.filter((run) => run.platform === platform && run.owner === account.id && run.draftId && !run.draftMissing)
     const existing = owned[0]?.draftId
     const saved = owned.find((run) => run.draftId === existing && run.state === 'saved')
-    if (existing && saved) return publishSaved(task.id, { ...saved, draftId: existing })
+    if (existing && saved) return publishSaved(task.id, { ...saved, draftId: existing }, defaults)
 
     let run: SyncRun = { ...base, owner: account.id, account: account.name, draftId: existing, articleTitle: article.title }
     await writeRun(task.id, run)
@@ -524,6 +717,14 @@ async function createWindow(): Promise<void> {
         const content = await weibo.prepareContent(account.id, article, readImage, uploading)
         progress(task.id, '正在保存微博草稿…')
         draftId = await weibo.saveDraft(account.id, article.title, content, existing, saveProgress)
+      } else if (platform === 'juejin') {
+        const content = await juejin.prepareContent(article, readImage, (completed, total) => {
+          const next = completed < total ? `，正在处理第 ${completed + 1} 张` : ''
+          progress(task.id, `掘金原图已确认 ${completed}/${total} 张${next}…`)
+        }, (html, images) => window.webContents.executeJavaScript(
+          `(${juejinMarkdown.toString()})(${JSON.stringify(html)}, ${JSON.stringify(images)})`))
+        progress(task.id, '正在保存掘金草稿…')
+        draftId = await juejin.saveDraft(account.id, article.title, content, existing, saveProgress, defaults)
       } else {
         const content = await zhihu.prepareContent(article, readImage, uploading)
         progress(task.id, '正在保存知乎草稿…')
@@ -535,7 +736,14 @@ async function createWindow(): Promise<void> {
     }
     const savedRun: SyncRun & { draftId: string } = { ...run, draftId, state: 'saved', finishedAt: new Date().toISOString() }
     await writeRun(task.id, savedRun)
-    return publishSaved(task.id, savedRun)
+    return publishSaved(task.id, savedRun, defaults)
+  }
+
+  async function juejinSettingsAccount(owner?: string) {
+    const account = await juejin.account()
+    if (!account) throw new Error('请先在应用内登录掘金。')
+    if (owner !== undefined && account.id !== owner) throw new Error('掘金账号已切换，请重新打开发布默认值。')
+    return account
   }
 
   const handlers = {
@@ -578,10 +786,36 @@ async function createWindow(): Promise<void> {
         }
       }
     },
+    'relay:open-juejin': async () => {
+      const alreadyOpen = activeView === juejinView && activeLabel === '掘金账号'
+      show(juejinView, '掘金账号')
+      const current = juejinView.webContents.getURL()
+      if (!alreadyOpen || !current || current === 'about:blank' || current.startsWith('chrome-error:')) {
+        await juejinView.webContents.loadURL(juejinHome)
+      }
+    },
     'relay:account': async (action?: Action) => {
-      const adapter = publicationPlatform(action) === 'weibo' ? weibo : zhihu
+      const adapter = publicationSites[publicationPlatform(action)]
       return { name: (await adapter.account())?.name ?? null }
     },
+    'relay:juejin-defaults': async () => {
+      const account = await juejinSettingsAccount()
+      const [categories, defaults] = await Promise.all([juejin.categories(), tasks.juejinDefaults(account.id)])
+      return { account, categories, defaults }
+    },
+    'relay:juejin-tags': async (action?: Action) => {
+      if (!juejinId(action?.owner) || typeof action?.query !== 'string') throw new Error('请输入掘金标签名称。')
+      await juejinSettingsAccount(action.owner)
+      return juejin.searchTags(action.query)
+    },
+    'relay:save-juejin-defaults': (action?: Action) => serial(async () => {
+      const defaults = parseJuejinDefaults(action?.defaults)
+      if (!juejinId(action?.owner) || !defaults) throw new Error('请选择一个掘金分类和至少一个标签。')
+      const account = await juejinSettingsAccount(action.owner)
+      const validated = await juejin.validateDefaults(defaults, account.tagLimit)
+      await juejinSettingsAccount(account.id)
+      await tasks.saveJuejinDefaults(account.id, validated)
+    }),
     'relay:tasks': () => tasks.list(),
     'relay:delete-publication': (action?: Action) => serial(() => deletePublication(selectedTask(action), action?.runId)),
     'relay:delete-task': (action?: Action) => serial(async () => {
@@ -610,16 +844,19 @@ async function createWindow(): Promise<void> {
         await failImport(task.id, error)
       }
     }),
-    'relay:hide-browser': () => show(),
+    'relay:hide-browser': (action?: Action) => {
+      const draft = action?.returnFromDraft ? activeDraft : undefined
+      show()
+      if (draft) void refreshAfterDraft(draft).catch(() => {})
+    },
     'relay:show-draft': (action?: Action) => serial(async () => {
       const task = selectedTask(action)
       const run = task.runs.find((item) => item.id === action?.runId)
-      if (!run?.draftId || run.draftMissing || !run.error ||
-          (run.state !== 'saved' && !(run.state === 'publish-uncertain' && run.manualHandoff))) {
+      if (!run || !canOpenDraft(run, task.runs)) {
         throw new Error('这次发布没有可打开的草稿。')
       }
       const name = platformNames[run.platform]
-      const account = await (run.platform === 'weibo' ? weibo : zhihu).account()
+      const account = await publicationSites[run.platform].account()
       if (!account || run.owner !== account.id) {
         throw new Error(`请先登录保存这份草稿的${name}账号。`)
       }
@@ -633,7 +870,18 @@ async function createWindow(): Promise<void> {
             error: '已交给微博编辑器处理。手动发布后，请用文章链接核对结果。',
           })
         }
-        show(weiboView, '微博草稿编辑器')
+        show(weiboView, '微博草稿编辑器', { taskId: task.id, runId: run.id })
+        return
+      }
+      if (run.platform === 'juejin') {
+        await juejinView.webContents.loadURL(juejinDraftUrl(run.draftId))
+        if (run.state === 'saved') {
+          await writeRun(task.id, {
+            ...run, state: 'publish-uncertain', manualHandoff: true,
+            error: '已打开掘金草稿。提交后请返回工作区核对发布结果。',
+          })
+        }
+        show(juejinView, '掘金草稿编辑器', { taskId: task.id, runId: run.id })
         return
       }
       await zhihuView.webContents.loadURL(draftUrl(run.draftId))
@@ -643,30 +891,20 @@ async function createWindow(): Promise<void> {
           error: '已交给知乎编辑器处理。请在知乎核对文章状态。',
         })
       }
-      show(zhihuView, '知乎草稿编辑器')
+      show(zhihuView, '知乎草稿编辑器', { taskId: task.id, runId: run.id })
     }),
     'relay:show-article': (action?: Action) => serial(async () => {
       const task = selectedTask(action)
       const run = articleRun(task, action?.runId)
-      if (run.platform === 'weibo' && !run.publishedUrl) {
-        progress(task.id, '正在查找已发布的微博文章…')
-        const confirmed = await checkWeiboHistory(run)
-        if (confirmed && (confirmed.url || run.state === 'publish-uncertain')) {
-          return recordPublished(task.id, run, confirmed.url)
-        }
-        show(weiboView, '微博文章管理')
-        if (run.state === 'published') {
-          await weiboView.webContents.loadURL(weiboHistoryUrl(run.draftId))
-        } else if (weiboView.webContents.getURL().split('#')[0] !== weiboEditor) {
-          await weiboView.webContents.loadURL(weiboEditor)
-        }
-        return { checkNotice: run.state === 'published'
-          ? '文章已发布。可以复制文章链接并返回工作区补录。'
-          : '请在微博核对文章。发布后，复制文章链接并返回工作区核对。' }
+      if (action?.openOnly !== true && (run.state === 'publish-uncertain' || (run.platform === 'weibo' && !run.publishedUrl))) {
+        progress(task.id, `正在刷新${platformNames[run.platform]}发布状态…`)
+        return refreshPublication(task.id, run, true)
       }
-      if (run.state === 'publish-uncertain') {
-        progress(task.id, '正在核对知乎发布结果…')
-        if (await checkZhihuArticle(zhihuView.webContents, run.draftId)) return recordPublished(task.id, run)
+      if (run.platform === 'juejin') {
+        const id = juejinArticleId(run.publishedUrl ?? '')
+        if (!id) throw new Error('这次发布没有可查看的掘金文章链接。')
+        await shell.openExternal(juejinArticleUrl(id))
+        return { articleOpened: true }
       }
       const url = run.platform === 'weibo' ? weiboArticleUrl(run.publishedUrl ?? '') : articleUrl(run.draftId)
       if (!url) throw new Error('这次同步没有可查看的文章链接。')
@@ -677,9 +915,44 @@ async function createWindow(): Promise<void> {
       }
       return { articleOpened: true, needsConfirmation: run.state === 'publish-uncertain' }
     }),
+    'relay:open-weibo-result': (action?: Action) => serial(async () => {
+      const run = articleRun(selectedTask(action), action?.runId)
+      if (run.platform !== 'weibo') throw new Error('这次同步没有可打开的微博页面。')
+      const url = weiboArticleUrl(run.publishedUrl ?? '')
+      if (url) {
+        await shell.openExternal(url)
+        return
+      }
+      show(weiboView, '微博文章管理')
+      await weiboView.webContents.loadURL(run.state === 'published' ? weiboHistoryUrl(run.draftId) : weiboEditor)
+    }),
+    'relay:open-juejin-result': (action?: Action) => serial(async () => {
+      const task = selectedTask(action)
+      const run = articleRun(task, action?.runId)
+      if (run.platform !== 'juejin') throw new Error('这次同步没有可打开的掘金页面。')
+      if (run.state === 'published') {
+        const id = juejinArticleId(run.publishedUrl ?? '')
+        if (!id) throw new Error('这次发布没有可查看的掘金文章链接。')
+        await shell.openExternal(juejinArticleUrl(id))
+        return
+      }
+      const preview = run.juejinAudit !== 'rejected' && juejinId(run.articleId) ? juejinReviewUrl(run.articleId) : undefined
+      show(juejinView, preview ? '掘金审核预览' : '掘金文章管理')
+      await juejinView.webContents.loadURL(preview ?? juejinArticles)
+    }),
     'relay:mark-published': (action?: Action) => serial(async () => {
       const task = selectedTask(action)
       const run = articleRun(task, action?.runId)
+      if (run.platform === 'juejin') {
+        if (run.state === 'published') return { publishedUrl: run.publishedUrl }
+        const id = juejinArticleId(action?.url ?? '', true)
+        if (!id) throw new Error('请输入有效的掘金文章链接。')
+        const stopped = await stopJuejinAutoCheck(task.id, run)
+        const checked = await juejin.publicationStatus(run.draftId, run.owner, id)
+        if (checked.id !== id || (!checked.url && !checked.audit)) throw new Error('未能核实链接对应这份草稿。自动核对已停止。')
+        const published = await applyJuejinAuditResult(task.id, stopped, checked)
+        return published ?? { checkNotice: juejinAuditNotice(checked, stopped) }
+      }
       if (run.platform === 'weibo') {
         if (run.publishedUrl) return { publishedUrl: run.publishedUrl }
         const url = weiboArticleUrl(action?.url ?? '')
@@ -711,12 +984,33 @@ async function createWindow(): Promise<void> {
   }
 
   window.webContents.on('will-navigate', (event) => event.preventDefault())
-  window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  let helpWindow: BrowserWindow | undefined
+  window.webContents.setWindowOpenHandler(({ url }) => {
+    if (url === helpUrl) {
+      if (helpWindow && !helpWindow.isDestroyed()) {
+        if (helpWindow.isMinimized()) helpWindow.restore()
+        helpWindow.focus()
+      } else {
+        helpWindow = new BrowserWindow({
+          parent: window, width: 880, height: 760, minWidth: 480, minHeight: 400,
+          backgroundColor: '#f3f5f9', autoHideMenuBar: true,
+          webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false },
+        })
+        helpWindow.webContents.on('will-navigate', (event) => event.preventDefault())
+        helpWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+        void helpWindow.loadURL(helpUrl).catch((error) => console.error('文章同步：帮助页面加载失败。', error))
+      }
+    }
+    return { action: 'deny' }
+  })
   window.on('resize', () => resizeBrowser())
   window.on('closed', () => {
     weiboAccountWatch?.abort()
+    juejinAuditMonitor.close()
+    juejinSession.webRequest.onBeforeRequest(null)
     for (const channel of Object.keys(handlers)) ipcMain.removeHandler(channel)
-    for (const view of [sourceView, zhihuView, weiboView]) view.webContents.close()
+    zhihuDraftCheckView?.webContents.close()
+    for (const view of [sourceView, zhihuView, weiboView, juejinView]) view.webContents.close()
   })
   await window.loadURL(workspaceUrl)
   const initialized = await window.webContents.executeJavaScript(`
@@ -730,7 +1024,10 @@ async function createWindow(): Promise<void> {
     }
   `)
   if (!initialized) console.error('文章同步：界面脚本未完成初始化。')
-  if (initialized) void reconcileWeiboRuns().catch(() => {})
+  if (initialized) {
+    syncJuejinAudits()
+    void reconcileWeiboRuns().catch(() => {})
+  }
 }
 
 app.setName('文章同步')
@@ -745,7 +1042,7 @@ if (!app.requestSingleInstanceLock()) {
     app.quit()
   })
   app.on('second-instance', () => {
-    const window = BrowserWindow.getAllWindows()[0]
+    const window = BrowserWindow.getAllWindows().find((candidate) => !candidate.getParentWindow())
     if (window?.isMinimized()) window.restore()
     window?.focus()
   })

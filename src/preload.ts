@@ -1,5 +1,7 @@
 // A sandboxed preload provides require('electron') without CommonJS exports.
 const { contextBridge, ipcRenderer } = require('electron') as typeof import('electron')
+type RelayPlatform = import('./tasks.js').Platform
+type JuejinDefaults = import('./juejin.js').JuejinDefaults
 
 contextBridge.exposeInMainWorld('relay', {
   getVersion: () => ipcRenderer.invoke('relay:version'),
@@ -10,7 +12,11 @@ contextBridge.exposeInMainWorld('relay', {
   restart: () => ipcRenderer.invoke('relay:restart'),
   openZhihu: () => ipcRenderer.invoke('relay:open-zhihu'),
   openWeibo: () => ipcRenderer.invoke('relay:open-weibo'),
-  checkAccount: (platform?: 'zhihu' | 'weibo') => platform
+  openJuejin: () => ipcRenderer.invoke('relay:open-juejin'),
+  getJuejinDefaults: () => ipcRenderer.invoke('relay:juejin-defaults'),
+  searchJuejinTags: (owner: string, query: string) => ipcRenderer.invoke('relay:juejin-tags', { owner, query }),
+  saveJuejinDefaults: (owner: string, defaults: JuejinDefaults) => ipcRenderer.invoke('relay:save-juejin-defaults', { owner, defaults }),
+  checkAccount: (platform?: RelayPlatform) => platform
     ? ipcRenderer.invoke('relay:account', { platform }) : ipcRenderer.invoke('relay:account'),
   listTasks: () => ipcRenderer.invoke('relay:tasks'),
   deleteTask: (taskId: string) => ipcRenderer.invoke('relay:delete-task', { taskId }),
@@ -19,11 +25,15 @@ contextBridge.exposeInMainWorld('relay', {
   importTask: (taskId: string, refresh = false) => ipcRenderer.invoke('relay:import', { taskId, refresh }),
   readArticle: (taskId: string) => ipcRenderer.invoke('relay:read', { taskId }),
   showDraft: (taskId: string, runId: string) => ipcRenderer.invoke('relay:show-draft', { taskId, runId }),
-  hideBrowser: () => ipcRenderer.invoke('relay:hide-browser'),
-  publishArticle: (taskId: string, platform?: 'zhihu' | 'weibo') =>
+  hideBrowser: (returnFromDraft = false) => returnFromDraft
+    ? ipcRenderer.invoke('relay:hide-browser', { returnFromDraft }) : ipcRenderer.invoke('relay:hide-browser'),
+  publishArticle: (taskId: string, platform?: RelayPlatform) =>
     ipcRenderer.invoke('relay:publish', platform ? { taskId, platform } : { taskId }),
   publishAll: (taskId: string) => ipcRenderer.invoke('relay:publish-all', { taskId }),
   showArticle: (taskId: string, runId: string) => ipcRenderer.invoke('relay:show-article', { taskId, runId }),
+  openZhihuArticle: (taskId: string, runId: string) => ipcRenderer.invoke('relay:show-article', { taskId, runId, openOnly: true }),
+  openWeiboResult: (taskId: string, runId: string) => ipcRenderer.invoke('relay:open-weibo-result', { taskId, runId }),
+  openJuejinResult: (taskId: string, runId: string) => ipcRenderer.invoke('relay:open-juejin-result', { taskId, runId }),
   markPublished: (taskId: string, runId: string, url?: string) =>
     ipcRenderer.invoke('relay:mark-published', url ? { taskId, runId, url } : { taskId, runId }),
   onProgress: (callback: (taskId: string, label: string) => void) => {

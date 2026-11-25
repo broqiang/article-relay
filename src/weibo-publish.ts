@@ -1,6 +1,6 @@
 import { setTimeout as delay } from 'node:timers/promises'
 import type { WebContents } from 'electron'
-import { weiboArticleUrl, weiboDraftUrl } from './weibo.js'
+import { normalizeWeiboArticleTitle, weiboArticleUrl, weiboDraftUrl } from './weibo.js'
 
 type Editor = Pick<WebContents, 'loadURL' | 'executeJavaScriptInIsolatedWorld' | 'stop'>
 type Phase = 'next' | 'submit' | 'observe' | 'verify'
@@ -10,12 +10,15 @@ type PublishResult =
   | { state: 'manual'; step: 'load' | 'next' | 'submit' }
   | { state: 'uncertain' }
 
-function inspectPage(editor: string, title: string, owner: string, phase: Phase, deadline: number): PageResult {
+function inspectPage(
+  normalizeArticleTitle: typeof normalizeWeiboArticleTitle,
+  editor: string, title: string, owner: string, phase: Phase, deadline: number,
+): PageResult {
   const normalize = (text: string) => text.normalize('NFKC').replace(/\s+/g, ' ').trim()
   const heading = document.querySelector('[node-type="articleTitle"]')
   const author = heading?.parentElement?.querySelector<HTMLAnchorElement>('.authorinfo .author1 a[href]')
   if ((phase === 'observe' || phase === 'verify') &&
-      heading && normalize(heading.textContent ?? '') === normalize(title) &&
+      heading && normalizeArticleTitle(heading.textContent ?? '') === normalizeArticleTitle(title) &&
       author?.pathname === '/u/' + owner) {
     return { article: location.href }
   }
@@ -110,7 +113,7 @@ async function beforeDeadline<T>(work: Promise<T>, deadline: number): Promise<T>
 function inspect(contents: Editor, editor: string, title: string, owner: string, phase: Phase, deadline: number): Promise<PageResult> {
   const args = JSON.stringify([editor, title, owner, phase, deadline])
   return beforeDeadline(contents.executeJavaScriptInIsolatedWorld(1001, [
-    { code: `(${inspectPage.toString()})(...${args})` },
+    { code: `(${inspectPage.toString()})((${normalizeWeiboArticleTitle.toString()}), ...${args})` },
   ], phase === 'next' || phase === 'submit'), deadline)
 }
 

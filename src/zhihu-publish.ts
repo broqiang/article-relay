@@ -2,8 +2,8 @@ import { setTimeout as delay } from 'node:timers/promises'
 import type { WebContents } from 'electron'
 import { articleUrl, draftUrl } from './zhihu.js'
 
-type PageState = 'waiting' | 'submitted' | 'published' | 'manual'
-export type PublishResult = 'published' | 'manual' | 'uncertain'
+type PageState = 'waiting' | 'submitted' | 'published' | 'manual' | 'rate-limited'
+export type PublishResult = 'published' | 'manual' | 'uncertain' | 'rate-limited'
 
 type Phase = 'open' | 'confirm' | 'observe'
 
@@ -13,14 +13,18 @@ function publishInEditor(editor: string, article: string, phase: Phase, expiresA
     return document.querySelector('h1.Post-Title, .Post-Main h1, article h1') ? 'published' : 'waiting'
   }
   if (current !== editor) return 'manual'
-  if (phase !== 'open' && [...document.querySelectorAll('.Toast, [role="status"], [role="alert"]')].some((node) =>
-    ['发布成功', '文章发布成功', '文章已发布'].includes(node.textContent?.trim() ?? ''))) {
-    return 'published'
+  const visible = (node: HTMLElement) =>
+    node.getClientRects().length > 0 && getComputedStyle(node).visibility === 'visible' && !node.closest('[inert], [aria-hidden="true"]')
+  if (phase !== 'open') {
+    const notices = [...document.querySelectorAll<HTMLElement>('.Toast, [role="status"], [role="alert"]')]
+    if (notices.some((node) => ['发布成功', '文章发布成功', '文章已发布'].includes(node.textContent?.trim() ?? ''))) {
+      return 'published'
+    }
+    if (notices.some((node) => visible(node) && /^近期发布频率过高[，,]请24小时后重试[~～。！!]*$/.test(
+      (node.textContent ?? '').replace(/\s+/g, '')))) return 'rate-limited'
   }
   if (phase === 'observe' || Date.now() >= expiresAt) return 'waiting'
 
-  const visible = (node: HTMLElement) =>
-    node.getClientRects().length > 0 && getComputedStyle(node).visibility === 'visible' && !node.closest('[inert], [aria-hidden="true"]')
   const dialogs = [...document.querySelectorAll<HTMLElement>('[role="dialog"], dialog[open], .Modal')].filter(visible)
   const buttons = [...document.querySelectorAll<HTMLButtonElement>('button')].filter((button) =>
     visible(button) && !button.matches(':disabled, [aria-disabled="true"]'))
@@ -108,7 +112,7 @@ export async function publishZhihuDraft(contents: Editor, id: string, waitMs = 1
       phase = 'observe'
       state = 'waiting'
     }
-    if (state === 'published') return 'published'
+    if (state === 'published' || state === 'rate-limited') return state
     if (state === 'manual' && phase === 'open') return 'manual'
     if (state === 'submitted') {
       phase = phase === 'open' ? 'confirm' : 'observe'

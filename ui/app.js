@@ -3,6 +3,7 @@ const relay = window.relay
 const platforms = {
   zhihu: { name: '知乎', icon: 'zhihu.ico', open: () => relay.openZhihu() },
   weibo: { name: '微博', icon: 'weibo.ico', open: () => relay.openWeibo() },
+  juejin: { name: '掘金', icon: 'juejin.ico', open: () => relay.openJuejin() },
 }
 const platformEntries = Object.entries(platforms)
 const importLabels = {
@@ -12,6 +13,7 @@ const runLabels = {
   running: '准备发布中', saved: '平台草稿已保存', failed: '发布失败',
   publishing: '发布中', published: '已发布', 'publish-uncertain': '发布结果待核对',
 }
+const juejinAuditLabels = { reviewing: '已提交 · 审核中', rejected: '审核未通过' }
 const accountLabels = { checking: '正在检查登录状态…', signedIn: '已登录', signedOut: '未登录', unknown: '登录状态待确认' }
 const dateFormat = new Intl.DateTimeFormat('zh-CN', { dateStyle: 'short', timeStyle: 'short' })
 const accounts = Object.fromEntries(platformEntries.map(([id]) => [id, { state: 'checking' }]))
@@ -19,14 +21,16 @@ let tasks = []
 let selectedId
 let busy = false
 let screen = 'article'
+let importReturnScreen = 'article'
 let browserLabel = ''
 let pendingMessage = ''
 let messageIsError = false
 let confirmedWeiboAccount
+let juejinSettings
 
 function renderMessage() {
-  const target = browserLabel ? 'browser-status' : screen === 'accounts' ? 'account-status' : 'status'
-  for (const id of ['status', 'account-status', 'browser-status']) {
+  const target = browserLabel ? 'browser-status' : { article: 'status', accounts: 'account-status', import: 'import-status' }[screen]
+  for (const id of ['status', 'account-status', 'import-status', 'browser-status']) {
     const node = byId(id)
     node.textContent = id === target ? pendingMessage : ''
     node.classList.toggle('error', id === target && messageIsError)
@@ -41,14 +45,18 @@ function message(text, error = false) {
 
 function renderScreen() {
   const managing = screen === 'accounts'
-  byId('workspace-heading').textContent = browserLabel || (managing ? '发布账号' : '同步工作区')
-  byId('article-workspace').hidden = managing || Boolean(browserLabel)
-  byId('accounts-workspace').hidden = !managing || Boolean(browserLabel)
+  byId('workspace-heading').textContent = browserLabel || { article: '同步工作区', accounts: '发布账号', import: '导入文章' }[screen]
+  for (const page of ['article', 'accounts', 'import']) {
+    byId(`${page}-workspace`).hidden = screen !== page || Boolean(browserLabel)
+  }
   byId('browser-status').hidden = !browserLabel
-  byId('back').hidden = !browserLabel && !managing
-  byId('back-label').textContent = browserLabel && managing ? '返回账号列表' : '返回工作区'
+  byId('back').hidden = !browserLabel && screen === 'article'
+  const backToAccounts = browserLabel && managing || screen === 'import' && importReturnScreen === 'accounts'
+  byId('back-label').textContent = backToAccounts ? '返回账号列表' : '返回工作区'
   if (managing) byId('open-accounts').setAttribute('aria-current', 'page')
   else byId('open-accounts').removeAttribute('aria-current')
+  if (screen === 'import') byId('open-import').setAttribute('aria-current', 'page')
+  else byId('open-import').removeAttribute('aria-current')
   renderMessage()
 }
 
@@ -79,6 +87,10 @@ function button(icon, label, className, handler) {
   return control
 }
 
+function deletePublicationButton(handler) {
+  return button('trash', '删除本地发布记录', 'quiet danger delete-publication', handler)
+}
+
 function selectedTask() {
   return tasks.find((task) => task.id === selectedId)
 }
@@ -88,16 +100,26 @@ function platformRun(runs) {
     runs.find((run) => ['publishing', 'publish-uncertain'].includes(run.state)) ?? runs[0]
 }
 
+function runLabel(run) {
+  return juejinAuditLabels[run.juejinAudit] || runLabels[run.state]
+}
+
+function runClass(run) {
+  return `run-state ${run.juejinAudit || run.state}`
+}
+
 function taskLabel(task) {
   if (task.importState !== 'ready') return importLabels[task.importState]
   const current = platformEntries.map(([id]) => platformRun(task.runs.filter((run) => run.platform === id)))
   const published = current.filter((run) => run?.state === 'published').length
-  const checking = current.filter((run) => run?.state === 'publish-uncertain').length
+  const checking = current.filter((run) => run?.state === 'publish-uncertain' && !run.juejinAudit).length
+  const audit = current.find((run) => run?.juejinAudit)?.juejinAudit
   const working = current.some((run) => ['running', 'publishing'].includes(run?.state))
   const failures = current.filter((run) => run?.state === 'failed').length
   const parts = [
     published && `已发布 ${published} 个平台`,
     checking && `${checking} 个平台待核对`,
+    audit && `掘金${audit === 'reviewing' ? '审核中' : '审核未通过'}`,
     working && '发布中',
     failures && `${failures} 个平台发布失败`,
   ].filter(Boolean)
@@ -147,6 +169,7 @@ function renderAccounts() {
     identity.append(heading)
     if (account.name) identity.append(element('small', account.name, 'muted'))
     const actions = element('div', '', 'platform-actions')
+    if (id === 'juejin') actions.append(button('check', '发布默认值', 'quiet', () => void runAction(openJuejinDefaults)))
     actions.append(
       button('login', account.state === 'signedOut' ? '登录' : `打开${platform.name}`, 'secondary', () => void runAction(() => openAccount(id))),
       button('search', '检查登录', 'quiet', () => void runAction(async () => {
@@ -169,66 +192,99 @@ function setAccount(id, state, name) {
   renderControls(task)
 }
 
-function runInformation(task, run, platform, pendingLinks) {
-  const body = element('div', '', 'run-detail')
+function runTime(run) {
   const time = run.finishedAt || run.startedAt
-  body.append(element('p', [run.account, dateFormat.format(new Date(time))].filter(Boolean).join(' · '), 'muted'))
-  if (run.error) body.append(element('p', run.error, 'run-error'))
-  if (run.draftMissing) body.append(element('p', '平台草稿已失效。', 'muted'))
-  const url = run.publishedUrl || (run.platform === 'zhihu' && run.draftId && ['published', 'publish-uncertain'].includes(run.state)
-    ? `https://zhuanlan.zhihu.com/p/${run.draftId}` : '')
-  if (url) body.append(element('p', url, 'muted source-link'))
+  const node = element('time', dateFormat.format(new Date(time)), 'publication-time muted')
+  node.dateTime = time
+  return node
+}
 
-  const actions = element('div', '', 'platform-actions')
-  const closed = task.runs.some((item) => item.platform === run.platform && item.account === run.account &&
-    item.draftId === run.draftId && ['publishing', 'published', 'publish-uncertain'].includes(item.state))
-  if (run.draftId && !run.draftMissing && run.error &&
-      ((run.state === 'saved' && !closed) || (run.state === 'publish-uncertain' && run.manualHandoff))) {
-    actions.append(button('document', '打开平台草稿', 'secondary', () => void runAction(() => relay.showDraft(task.id, run.id))))
+function publicationActions(task, id, run, canClearLocalHistory = false, current = true) {
+  const actions = element('div', '', 'platform-actions publication-actions')
+  if (run?.canOpenDraft) {
+    actions.append(button('document', '打开草稿', 'secondary', () => void runAction(() => relay.showDraft(task.id, run.id))))
   }
-  if (run.state === 'publish-uncertain' && run.platform === 'zhihu' && run.draftId) {
+  const primary = current ? platformAction(task, id, run) : run?.draftId && ['published', 'publish-uncertain'].includes(run.state) ?
+    articleButton(task, run) : undefined
+  if (primary) actions.append(primary)
+  if (run?.state === 'publish-uncertain' && run.platform === 'zhihu' && run.draftId) {
     actions.append(button('check', '标记已发布', 'quiet', () => void runAction(async () => {
       if (window.confirm('确认已在知乎看到这篇文章公开发布？')) {
         await showPublishResult(await relay.markPublished(task.id, run.id), run.platform)
       }
     })))
   }
-  if (run.state === 'published' && run.draftId) {
-    actions.append(button('trash', '删除本地发布记录', 'quiet danger delete-publication', () => void runAction(async () => {
-      if (!window.confirm(`核对${platform.name}已删除这篇文章后，清理该平台的本地发布记录？清理后可以再次发布。`)) return
+  if (canClearLocalHistory) {
+    actions.append(deletePublicationButton(() => void runAction(async () => {
+      if (!window.confirm('删除这篇文章的全部掘金本地发布记录和历史？掘金上的草稿和文章会保留。')) return
       await relay.deletePublication(task.id, run.id)
-      message(`${platform.name}的本地发布记录已删除，可以再次发布。`)
+      message('掘金本地发布记录和历史已删除。')
     })))
   }
-  if (actions.childElementCount) body.append(actions)
-
-  if (run.platform === 'weibo' && run.draftId && !url && ['published', 'publish-uncertain'].includes(run.state)) {
-    const form = element('form', '', 'article-check')
-    const input = document.createElement('input')
-    input.type = 'url'
-    input.required = true
-    input.placeholder = '粘贴微博头条文章链接'
-    input.setAttribute('aria-label', '微博头条文章链接')
-    input.dataset.runId = run.id
-    input.value = pendingLinks.get(run.id) || ''
-    const submit = element('button', '核对链接', 'secondary')
-    submit.prepend(buttonIcon('link'))
-    submit.type = 'submit'
-    form.append(input, submit)
-    form.addEventListener('submit', (event) => {
-      event.preventDefault()
-      void runAction(async () => showPublishResult(await relay.markPublished(task.id, run.id, input.value.trim()), run.platform))
-    })
-    body.append(form)
+  if (run?.state === 'published' && run.draftId) {
+    actions.append(deletePublicationButton(() => void runAction(async () => {
+      const name = platforms[id].name
+      if (!window.confirm(`核对${name}已删除这篇文章后，清理该平台的本地发布记录？清理后可以再次发布。`)) return
+      await relay.deletePublication(task.id, run.id)
+      message(`${name}的本地发布记录已删除，可以再次发布。`)
+    })))
   }
-  return body
+  return actions
 }
 
 function articleButton(task, run) {
-  const [icon, label] = run.state === 'publish-uncertain' ? ['search', '核对结果'] :
-    run.platform === 'weibo' && !run.publishedUrl ? ['link', '查找文章链接'] : ['document', '查看文章']
+  const refresh = run.state === 'publish-uncertain' || (run.platform === 'weibo' && !run.publishedUrl)
+  const [icon, label] = refresh ? ['restart', '刷新状态'] : ['document', '查看文章']
   return button(icon, label, 'secondary', () => void runAction(async () =>
     showPublishResult(await relay.showArticle(task.id, run.id), run.platform)))
+}
+
+function platformLink(href, label, open) {
+  const link = element('a', label, 'platform-link')
+  link.href = href
+  link.addEventListener('click', (event) => {
+    event.preventDefault()
+    void runAction(open)
+  })
+  return link
+}
+
+function publicationLinks(task, id, run) {
+  const links = element('div', '', 'publication-links')
+  const line = (label, value) => {
+    const row = element('div', '', 'publication-link-row')
+    row.append(element('span', `${label}：`, 'muted'), typeof value === 'string' ? element('span', value, 'muted') : value)
+    links.append(row)
+  }
+  const pending = run?.state === 'publish-uncertain'
+  const published = run?.state === 'published'
+  const zhihuUrl = id === 'zhihu' && run?.draftId && /^[1-9]\d*$/.test(run.draftId) ?
+    `https://zhuanlan.zhihu.com/p/${run.draftId}` : ''
+  const url = published ? run.publishedUrl || zhihuUrl : ''
+  const open = async () => {
+    if (id === 'zhihu') {
+      await showPublishResult(await relay.openZhihuArticle(task.id, run.id), id)
+    } else {
+      await (id === 'weibo' ? relay.openWeiboResult(task.id, run.id) : relay.openJuejinResult(task.id, run.id))
+      message('')
+    }
+  }
+  if (id === 'juejin' && pending && run.juejinAudit !== 'rejected' && /^[1-9]\d*$/.test(run.articleId ?? '')) {
+    const preview = `https://juejin.cn/spost/${run.articleId}`
+    line('审核链接', platformLink(preview, preview, open))
+  }
+  line('文章链接', url ? platformLink(url, url, open) : published ? '待匹配' : pending && !run.juejinAudit ? '待核对' : '未发布')
+  if (pending && zhihuUrl) line('核对链接', platformLink(zhihuUrl, zhihuUrl, open))
+  if (id === 'weibo' && !url && run?.draftId && (pending || published)) {
+    const editor = 'https://card.weibo.com/article/v5/editor'
+    links.append(platformLink(published ? `${editor}#/history/${run.draftId}` : editor,
+      published ? '打开微博发布记录' : '打开微博文章管理', open))
+  }
+  if (id === 'juejin' && pending && run.draftId && !run.draftMissing &&
+      (run.juejinAudit === 'rejected' || !/^[1-9]\d*$/.test(run.articleId ?? ''))) {
+    links.append(platformLink('https://juejin.cn/creator/content/article/essays?status=all', '打开掘金创作者中心', open))
+  }
+  return links
 }
 
 function platformAction(task, id, run) {
@@ -246,8 +302,7 @@ function platformAction(task, id, run) {
 
 function renderPlatforms(task) {
   const list = byId('platform-list')
-  const pendingLinks = new Map([...list.querySelectorAll('[data-run-id]')].map((input) => [input.dataset.runId, input.value]))
-  const expanded = new Set([...list.querySelectorAll('details[open]')].map((node) => node.dataset.detailsKey))
+  const detailsState = new Map([...list.querySelectorAll('details')].map((node) => [node.dataset.detailsKey, node.open]))
   list.replaceChildren(...platformEntries.map(([id, platform]) => {
     const runs = task.runs.filter((run) => run.platform === id)
     const current = platformRun(runs)
@@ -257,39 +312,50 @@ function renderPlatforms(task) {
     const identity = element('div', '', 'platform-identity')
     const account = current?.account && current.account !== '账号未确认' ? current.account :
       accounts[id].name || accountLabels[accounts[id].state]
-    identity.append(element('strong', platform.name), element('small', account, 'muted'))
+    const metadata = element('small', '', 'publication-account muted')
+    metadata.append(element('span', account))
+    if (current) metadata.append(runTime(current))
     const state = current?.state
-    const label = current ? runLabels[state] : task.importState === 'ready' ? '待发布' : '待导入'
-    const actions = element('div', '', 'platform-actions')
-    const primary = platformAction(task, id, current)
-    actions.append(element('span', label, `run-state ${state || ''}`))
-    if (primary) actions.append(primary)
-    header.append(identity, actions)
-    content.append(header)
-    row.append(platformIcon(platform), content)
+    const label = current ? runLabel(current) : task.importState === 'ready' ? '待发布' : '待导入'
+    identity.append(element('strong', platform.name), metadata, element('span', label, current ? runClass(current) : 'run-state'))
+    header.append(platformIcon(platform), identity)
+    const canClearLocalHistory = id === 'juejin' && runs.length > 0 &&
+      runs.every((run) => ['saved', 'failed', 'publish-uncertain'].includes(run.state))
+    const details = element('div', '', 'publication-details')
+    details.append(header, publicationLinks(task, id, current))
 
-    if (current?.error && state !== 'published') content.append(element('p', current.error, 'platform-note run-error'))
-    if (runs.length) {
-      const details = document.createElement('details')
-      details.dataset.detailsKey = current.id
-      details.open = expanded.has(current.id)
-      details.append(element('summary', '发布详情', 'muted'), runInformation(task, current, platform, pendingLinks))
-      const older = runs.filter((run) => run !== current)
-      if (older.length) {
-        const history = element('details', '', 'platform-history')
-        history.dataset.detailsKey = `history-${current.id}`
-        history.open = expanded.has(history.dataset.detailsKey)
-        history.append(element('summary', `历史记录（${older.length}）`, 'muted'))
-        for (const run of older) {
-          const entry = element('div', '', 'history-entry')
-          entry.append(element('strong', runLabels[run.state], `run-state ${run.state}`))
-          if (['published', 'publish-uncertain'].includes(run.state) && run.draftId) entry.append(articleButton(task, run))
-          entry.append(runInformation(task, run, platform, pendingLinks))
-          history.append(entry)
-        }
-        details.append(history)
+    if (current?.error && state !== 'published') details.append(element('p', current.error,
+      `platform-note ${current.juejinAudit === 'reviewing' ? 'muted' : 'run-error'}`))
+    if (id === 'juejin' && state === 'publish-uncertain' && current.draftId && !current.draftMissing) {
+      if (current.juejinAudit !== 'rejected') {
+        details.append(element('p', current.juejinAutoCheckStopped ? '手动核对后已停止自动核对，可继续刷新状态。' :
+          '自动核对：首次 30 秒，之后每分钟一次。关闭应用后暂停，手动刷新后停止。', 'platform-note muted'))
       }
-      content.append(details)
+    }
+    if (current?.draftMissing) details.append(element('p', '平台草稿已失效。', 'platform-note muted'))
+    const actions = publicationActions(task, id, current, canClearLocalHistory)
+    content.append(details)
+    if (actions.childElementCount) content.append(actions)
+    row.append(content)
+    const older = runs.filter((run) => run !== current)
+    if (older.length) {
+      const history = element('details', '', 'platform-history')
+      history.dataset.detailsKey = `history-${current.id}`
+      history.open = detailsState.get(history.dataset.detailsKey) ?? false
+      history.append(element('summary', `历史记录（${older.length}）`, 'muted'))
+      for (const run of older) {
+        const entry = element('div', '', 'history-entry')
+        const heading = element('div', '', 'history-heading')
+        heading.append(element('strong', runLabel(run), runClass(run)), element('small', run.account, 'muted'), runTime(run))
+        entry.append(heading)
+        const historyActions = publicationActions(task, id, run, false, false)
+        if (historyActions.childElementCount) entry.append(historyActions)
+        entry.append(publicationLinks(task, id, run))
+        if (run.draftMissing) entry.append(element('p', '平台草稿已失效。', 'platform-note muted'))
+        if (run.error) entry.append(element('p', run.error, 'platform-note muted'))
+        history.append(entry)
+      }
+      row.append(history)
     }
     return row
   }))
@@ -308,11 +374,12 @@ function render() {
       message('')
       await relay.hideBrowser()
     }))
-    if (item === task) control.setAttribute('aria-current', 'true')
+    if (item === task && screen !== 'import') control.setAttribute('aria-current', 'true')
     control.append(element('strong', item.title || '公众号文章'), element('small', taskLabel(item)))
     row.append(control)
     list.append(row)
   }
+  byId('no-article').hidden = Boolean(task)
   byId('summary').hidden = !task
   byId('platform-results').hidden = !task
   if (task) {
@@ -338,6 +405,10 @@ function render() {
 function updateTasks(items, selection) {
   tasks = items
   selectedId = selection || selectedTask()?.id || tasks[0]?.id
+  if (selection && screen === 'import') {
+    screen = 'article'
+    byId('source-form').reset()
+  }
   render()
 }
 
@@ -379,6 +450,81 @@ async function openAccount(id) {
   await platforms[id].open()
 }
 
+function juejinSettingsMessage(text, error = false) {
+  const node = byId('juejin-defaults-status')
+  node.textContent = text
+  node.classList.toggle('error', error)
+}
+
+function renderJuejinTags() {
+  const { tags, found, account, saving, searching } = juejinSettings
+  const selected = new Set(tags.map(({ id }) => id))
+  const full = account.tagLimit !== undefined && tags.length >= account.tagLimit
+  byId('juejin-selected-tags').replaceChildren(...tags.map((tag) => {
+    const control = button('close', tag.name, 'quiet juejin-selected-tag', () => {
+      juejinSettings.tags = tags.filter(({ id }) => id !== tag.id)
+      renderJuejinTags()
+      byId('juejin-tag-query').focus()
+    })
+    control.setAttribute('aria-label', `移除标签 ${tag.name}`)
+    control.disabled = saving
+    return control
+  }))
+  byId('juejin-tag-results').replaceChildren(...found.filter(({ id }) => !selected.has(id)).map((tag) => {
+    const control = button('check', tag.name, 'secondary', () => {
+      juejinSettings.tags.push(tag)
+      renderJuejinTags()
+    })
+    control.disabled = full || saving
+    return control
+  }))
+  byId('juejin-category').disabled = saving
+  byId('juejin-tag-query').disabled = saving
+  byId('juejin-search-tags').disabled = saving || searching
+  byId('juejin-close-defaults').disabled = saving
+  byId('juejin-save-defaults').disabled = saving || !byId('juejin-category').value || !tags.length ||
+    (account.tagLimit !== undefined && tags.length > account.tagLimit)
+}
+
+async function openJuejinDefaults() {
+  const { account, categories, defaults } = await relay.getJuejinDefaults()
+  juejinSettings = { account, categories, tags: defaults?.tags ?? [], found: [], saving: false, searching: false }
+  const select = byId('juejin-category')
+  select.replaceChildren(new Option('请选择分类', ''), ...categories.map(({ id, name }) => new Option(name, id)))
+  select.value = categories.some(({ id }) => id === defaults?.category.id) ? defaults.category.id : ''
+  byId('juejin-defaults-account').textContent = account.tagLimit === undefined ? account.name :
+    `${account.name} · 最多 ${account.tagLimit} 个标签`
+  byId('juejin-tag-query').value = ''
+  juejinSettingsMessage(account.tagLimit === 0 ? '当前掘金账号暂时无法添加标签。' : '')
+  renderJuejinTags()
+  byId('juejin-defaults-dialog').showModal()
+}
+
+async function searchJuejinTags() {
+  const settings = juejinSettings
+  if (!settings || settings.saving || settings.searching) return
+  const query = byId('juejin-tag-query').value.trim()
+  if (!query) {
+    juejinSettingsMessage('请输入要搜索的标签。', true)
+    return
+  }
+  settings.searching = true
+  settings.found = []
+  juejinSettingsMessage('正在搜索掘金标签…')
+  renderJuejinTags()
+  try {
+    const tags = await relay.searchJuejinTags(settings.account.id, query)
+    if (settings !== juejinSettings || settings.saving) return
+    settings.found = tags
+    juejinSettingsMessage(tags.length ? '' : '没有找到匹配的标签。')
+  } catch (error) {
+    if (settings === juejinSettings && !settings.saving) juejinSettingsMessage(errorText(error), true)
+  } finally {
+    settings.searching = false
+    if (settings === juejinSettings) renderJuejinTags()
+  }
+}
+
 async function importTask(request) {
   message('正在准备公众号文章…')
   await request()
@@ -400,7 +546,7 @@ async function showPublishResult(result, id) {
   } else if (result.checkNotice) {
     message(result.checkNotice)
   } else if (result.publishNotice) {
-    message(result.publishNotice, true)
+    message(result.publishNotice, !result.saved && !result.reviewing)
   }
 }
 
@@ -409,13 +555,13 @@ async function publishAll() {
   const outcomes = await relay.publishAll(selectedId)
   const labels = {
     published: '已发布', 'already-published': '已发布，跳过', 'login-required': '未登录，登录后可补发',
-    'needs-check': '结果待核对', failed: '发布失败',
+    'needs-check': '结果待核对', reviewing: '已提交，审核中', saved: '草稿已保存', failed: '发布失败',
   }
   for (const { platform, state } of outcomes) {
     if (state === 'login-required') setAccount(platform, 'signedOut')
   }
   message(outcomes.map(({ platform, state, detail }) =>
-    `${platforms[platform].name}：${state === 'failed' && detail ? detail : labels[state]}`).join(' · '),
+    `${platforms[platform].name}：${['failed', 'saved'].includes(state) && detail ? detail : labels[state]}`).join(' · '),
     outcomes.some(({ state }) => state === 'failed'))
 }
 
@@ -424,13 +570,22 @@ byId('open-accounts').addEventListener('click', () => void runAction(async () =>
   message('')
   await relay.hideBrowser()
 }))
+byId('open-import').addEventListener('click', async () => {
+  if (busy) return
+  if (screen !== 'import') {
+    await runAction(async () => {
+      if (browserLabel) await relay.hideBrowser(true)
+      importReturnScreen = screen
+      screen = 'import'
+      message('')
+    })
+  }
+  if (screen === 'import') byId('source-url').focus()
+})
 byId('source-form').addEventListener('submit', (event) => {
   event.preventDefault()
-  void runAction(async () => {
-    const input = byId('source-url')
-    await importTask(() => relay.importArticle(input.value.trim()))
-    input.value = ''
-  })
+  const url = byId('source-url').value.trim()
+  void runAction(() => importTask(() => relay.importArticle(url)))
 })
 byId('continue').addEventListener('click', () => void runAction(() => importTask(() => relay.readArticle(selectedId))))
 byId('retry-import').addEventListener('click', () => void runAction(() => importTask(() =>
@@ -446,14 +601,47 @@ byId('delete-task').addEventListener('click', () => void runAction(async () => {
 byId('back').addEventListener('click', () => void runAction(async () => {
   message('')
   if (!browserLabel) {
-    screen = 'article'
+    screen = screen === 'import' ? importReturnScreen : 'article'
     return
   }
   const loginPlatform = platformEntries.find(([, platform]) => browserLabel === `${platform.name}账号`)?.[0]
-  await relay.hideBrowser()
+  await relay.hideBrowser(true)
   if (loginPlatform) void checkAccount(loginPlatform).catch(() => {})
 }))
 if (relay) {
+  const defaultsDialog = byId('juejin-defaults-dialog')
+  defaultsDialog.addEventListener('close', () => { juejinSettings = undefined })
+  defaultsDialog.addEventListener('cancel', (event) => {
+    if (juejinSettings?.saving) event.preventDefault()
+  })
+  byId('juejin-close-defaults').addEventListener('click', () => defaultsDialog.close())
+  byId('juejin-category').addEventListener('change', renderJuejinTags)
+  byId('juejin-search-tags').addEventListener('click', () => void searchJuejinTags())
+  byId('juejin-tag-query').addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter' || event.isComposing) return
+    event.preventDefault()
+    void searchJuejinTags()
+  })
+  byId('juejin-defaults-form').addEventListener('submit', async (event) => {
+    event.preventDefault()
+    const settings = juejinSettings
+    const category = settings?.categories.find(({ id }) => id === byId('juejin-category').value)
+    if (!category || !settings.tags.length || settings.saving) return
+    settings.saving = true
+    juejinSettingsMessage('正在保存发布默认值…')
+    renderJuejinTags()
+    try {
+      await relay.saveJuejinDefaults(settings.account.id, { category, tags: settings.tags })
+      defaultsDialog.close()
+      message('掘金发布默认值已保存。')
+    } catch (error) {
+      juejinSettingsMessage(errorText(error), true)
+    } finally {
+      settings.saving = false
+      if (defaultsDialog.open && settings === juejinSettings) renderJuejinTags()
+    }
+  })
+
   const releaseLink = byId('open-releases')
   releaseLink.addEventListener('click', () => {
     void relay.openReleases().catch((error) => message(errorText(error), true))

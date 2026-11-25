@@ -5,11 +5,12 @@ import { join } from 'node:path'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import type { ReadableStream as NodeReadableStream } from 'node:stream/web'
+import { parseJuejinDefaults, type JuejinDefaults } from './juejin.js'
 import { wechatArticleUrl, type Article } from './wechat.js'
 
 export type ImportState = 'pending' | 'reading' | 'paused' | 'downloading' | 'ready' | 'failed'
 
-export const platformNames = { zhihu: '知乎', weibo: '微博' } as const
+export const platformNames = { zhihu: '知乎', weibo: '微博', juejin: '掘金' } as const
 export type Platform = keyof typeof platformNames
 
 export interface SyncRun {
@@ -21,11 +22,28 @@ export interface SyncRun {
   finishedAt?: string
   state: 'running' | 'saved' | 'failed' | 'publishing' | 'published' | 'publish-uncertain'
   draftId?: string
+  articleId?: string
   articleTitle?: string
   publishedUrl?: string
   manualHandoff?: boolean
   draftMissing?: boolean
+  juejinAudit?: 'reviewing' | 'rejected'
+  juejinAutoCheckStopped?: boolean
   error?: string
+}
+
+export function canCheckJuejinAudit(run: SyncRun): run is SyncRun & { draftId: string } {
+  return run.platform === 'juejin' && run.state === 'publish-uncertain' && Boolean(run.draftId) && !run.draftMissing &&
+    !run.juejinAutoCheckStopped && run.juejinAudit !== 'rejected'
+}
+
+export function canOpenDraft(run: SyncRun, runs: SyncRun[]): run is SyncRun & { draftId: string } {
+  if (!run.draftId || run.draftMissing) return false
+  const related = runs.filter((item) => item.platform === run.platform && item.draftId === run.draftId)
+  if (related.some((item) => item.state === 'published' || item.state === 'publishing' ||
+      (item.platform === 'juejin' && (item.articleId || item.juejinAudit)))) return false
+  if (run.state === 'saved') return !related.some((item) => item.state === 'publish-uncertain')
+  return run.state === 'publish-uncertain' && Boolean(run.manualHandoff || run.platform === 'zhihu' || run.platform === 'juejin')
 }
 
 export function blockingPublication(runs: SyncRun[], platform: Platform): SyncRun | undefined {
@@ -67,11 +85,13 @@ export interface Task {
   runs: SyncRun[]
 }
 
-type BatchState = 'published' | 'already-published' | 'login-required' | 'needs-check' | 'failed'
+type BatchState = 'published' | 'already-published' | 'login-required' | 'needs-check' | 'reviewing' | 'saved' | 'failed'
 
 export async function publishMissingPlatforms(
   getTask: () => Task,
-  publish: (task: Task, platform: Platform) => Promise<{ published?: boolean; loginRequired?: boolean; publishNotice?: string }>,
+  publish: (task: Task, platform: Platform) => Promise<{
+    published?: boolean; loginRequired?: boolean; saved?: boolean; reviewing?: boolean; publishNotice?: string
+  }>,
 ): Promise<{ platform: Platform; state: BatchState; detail?: string }[]> {
   const task = getTask()
   if (task.importState !== 'ready' || !task.article) throw new Error('请先完成公众号文章导入。')
@@ -80,12 +100,14 @@ export async function publishMissingPlatforms(
     const current = getTask()
     const prior = blockingPublication(current.runs, platform)
     if (prior) {
-      outcomes.push({ platform, state: prior.state === 'published' ? 'already-published' : 'needs-check' })
+      outcomes.push({ platform, state: prior.state === 'published' ? 'already-published' :
+        prior.juejinAudit === 'reviewing' ? 'reviewing' : 'needs-check' })
       continue
     }
     try {
       const result = await publish(current, platform)
-      const state = result.published ? 'published' : result.loginRequired ? 'login-required' :
+      const state = result.published ? 'published' : result.loginRequired ? 'login-required' : result.saved ? 'saved' :
+        result.reviewing ? 'reviewing' :
         blockingPublication(getTask().runs, platform) ? 'needs-check' : 'failed'
       outcomes.push({ platform, state, detail: result.publishNotice })
     } catch (error) {
@@ -152,7 +174,10 @@ export function taskSummary(task: Task) {
     importState: task.importState, importDetail: task.importDetail, extraction: task.extraction,
     total: urls.length, downloaded: urls.filter((url) => task.images.some((image) => image.url === url)).length,
     hasArticle: Boolean(task.article),
-    runs: task.runs.map(({ owner: _owner, ...run }) => run),
+    runs: task.runs.map((item) => {
+      const { owner: _owner, ...run } = item
+      return { ...run, canOpenDraft: canOpenDraft(item, task.runs) }
+    }),
   }
 }
 
@@ -213,6 +238,23 @@ export class TaskStore {
     return this.tasks.map(taskSummary).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
   }
 
+  private async readJuejinDefaults(): Promise<Record<string, unknown>> {
+    const content = await readOptional(join(this.root, 'juejin-defaults.json'))
+    if (content === undefined) return {}
+    const records: unknown = JSON.parse(content)
+    if (!records || typeof records !== 'object' || Array.isArray(records)) throw new Error('无法读取掘金发布默认值。')
+    return records as Record<string, unknown>
+  }
+
+  async juejinDefaults(owner: string): Promise<JuejinDefaults | undefined> {
+    return parseJuejinDefaults((await this.readJuejinDefaults())[owner])
+  }
+
+  async saveJuejinDefaults(owner: string, defaults: JuejinDefaults): Promise<void> {
+    const records = await this.readJuejinDefaults()
+    await atomicWrite(join(this.root, 'juejin-defaults.json'), JSON.stringify({ ...records, [owner]: defaults }))
+  }
+
   get(id: string): Task {
     const task = this.tasks.find((candidate) => candidate.id === id)
     if (!task) throw new Error('找不到这条任务记录。')
@@ -231,6 +273,16 @@ export class TaskStore {
     const updated = { ...this.get(id), ...changes, updatedAt: new Date().toISOString() }
     await this.commit(this.tasks.map((task) => task.id === id ? updated : task))
     return updated
+  }
+
+  async clearJuejinPublicationHistory(id: string, runId: string): Promise<void> {
+    const task = this.get(id)
+    const records = task.runs.filter((run) => run.platform === 'juejin')
+    if (!records.some((run) => run.id === runId) ||
+        records.some((run) => !['saved', 'failed', 'publish-uncertain'].includes(run.state))) {
+      throw new Error('当前无法清理掘金本地发布记录。')
+    }
+    await this.update(id, { runs: task.runs.filter((run) => run.platform !== 'juejin') })
   }
 
   async delete(id: string): Promise<{ mediaRemoved: boolean }> {

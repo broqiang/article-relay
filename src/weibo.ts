@@ -50,14 +50,19 @@ function requestId(owner: string): string {
   return (Buffer.from(`${owner}&${Date.now()}`).toString('base64url') + randomBytes(32).toString('base64url')).slice(0, 43)
 }
 
+export function normalizeWeiboArticleTitle(title: string): string {
+  // Weibo can render ASCII double quotes as double primes on public articles.
+  return title.replace(/[″“”]/g, '"').normalize('NFKC').replace(/\s+/g, ' ').trim()
+}
+
 export function findWeiboPublishedUrl(
   id: string, drafts: ReadonlyMap<string, PublishedDraft>, articles: PublishedArticle[],
 ): string | undefined {
   const draft = drafts.get(id)
   if (!draft?.title) return
-  const normalize = (title: string) => title.normalize('NFKC').replace(/\s+/g, ' ').trim()
   const matches = (candidate: PublishedDraft, article: PublishedArticle) =>
-    normalize(candidate.title) === normalize(article.title) && Math.abs(candidate.updatedAt - article.createdAt) <= 5_000
+    normalizeWeiboArticleTitle(candidate.title) === normalizeWeiboArticleTitle(article.title) &&
+    Math.abs(candidate.updatedAt - article.createdAt) <= 5_000
   const urls = new Set(articles.filter((article) => matches(draft, article) &&
     [...drafts.values()].filter((candidate) => matches(candidate, article)).length === 1).map((article) => article.url))
   if (urls.size === 1) return [...urls][0]

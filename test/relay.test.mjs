@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { createHash, createHmac } from 'node:crypto'
+import { EventEmitter } from 'node:events'
 import { readFileSync } from 'node:fs'
 import { access, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -12,7 +13,12 @@ import { checkZhihuArticle, publishZhihuDraft } from '../dist/zhihu-publish.js'
 import { Weibo, findWeiboPublishedUrl, isWeiboSsoCallback, weiboArticleUrl, weiboDraftUrl, weiboEditor, weiboHistoryUrl } from '../dist/weibo.js'
 import { checkWeiboArticle, publishWeiboDraft } from '../dist/weibo-publish.js'
 import { chromiumUserAgent, publicationUrlStatus } from '../dist/browser.js'
-import { blockingPublication, clearPublishedRun, publishMissingPlatforms, TaskStore, taskSummary } from '../dist/tasks.js'
+import { blockingPublication, canCheckJuejinAudit, canOpenDraft, clearPublishedRun, publishMissingPlatforms, TaskStore, taskSummary } from '../dist/tasks.js'
+import { Juejin, juejinArticleId, juejinDraftUrl, parseJuejinDefaults } from '../dist/juejin.js'
+import { uploadJuejinImage } from '../dist/juejin-images.js'
+import { publishJuejinDraft } from '../dist/juejin-publish.js'
+import { monitorJuejinPublishResponse } from '../dist/juejin-publish-response.js'
+import { monitorJuejinAudits } from '../dist/juejin-audit.js'
 
 test('initializes the bridge without CommonJS exports in a sandboxed preload', async () => {
   const preload = readFileSync(new URL('../dist/preload.js', import.meta.url), 'utf8')
@@ -45,6 +51,10 @@ test('initializes the bridge without CommonJS exports in a sandboxed preload', a
   assert.equal(await bridge.restart(), 'relay:restart')
   assert.equal(await bridge.openZhihu(), 'relay:open-zhihu')
   assert.equal(await bridge.openWeibo(), 'relay:open-weibo')
+  assert.equal(await bridge.openJuejin(), 'relay:open-juejin')
+  assert.equal(await bridge.getJuejinDefaults(), 'relay:juejin-defaults')
+  assert.equal(JSON.stringify(await bridge.searchJuejinTags('123', 'JavaScript')),
+    '{"channel":"relay:juejin-tags","args":{"owner":"123","query":"JavaScript"}}')
   assert.equal(await bridge.checkAccount(), 'relay:account')
   assert.equal(JSON.stringify(await bridge.deleteTask('task')), '{"channel":"relay:delete-task","args":{"taskId":"task"}}')
   assert.equal(JSON.stringify(await bridge.deletePublication('task', 'run')), '{"channel":"relay:delete-publication","args":{"taskId":"task","runId":"run"}}')
@@ -52,6 +62,14 @@ test('initializes the bridge without CommonJS exports in a sandboxed preload', a
   assert.equal(JSON.stringify(await bridge.publishArticle('task')), '{"channel":"relay:publish","args":{"taskId":"task"}}')
   assert.equal(JSON.stringify(await bridge.publishArticle('task', 'weibo')), '{"channel":"relay:publish","args":{"taskId":"task","platform":"weibo"}}')
   assert.equal(JSON.stringify(await bridge.showDraft('task', 'run')), '{"channel":"relay:show-draft","args":{"taskId":"task","runId":"run"}}')
+  assert.equal(JSON.stringify(await bridge.hideBrowser(true)),
+    '{"channel":"relay:hide-browser","args":{"returnFromDraft":true}}')
+  assert.equal(JSON.stringify(await bridge.openZhihuArticle('task', 'run')),
+    '{"channel":"relay:show-article","args":{"taskId":"task","runId":"run","openOnly":true}}')
+  assert.equal(JSON.stringify(await bridge.openJuejinResult('task', 'run')),
+    '{"channel":"relay:open-juejin-result","args":{"taskId":"task","runId":"run"}}')
+  assert.equal(JSON.stringify(await bridge.openWeiboResult('task', 'run')),
+    '{"channel":"relay:open-weibo-result","args":{"taskId":"task","runId":"run"}}')
   assert.equal(JSON.stringify(await bridge.markPublished('task', 'run')), '{"channel":"relay:mark-published","args":{"taskId":"task","runId":"run"}}')
   const accounts = []
   bridge.onWeiboAccountChanged((name) => accounts.push(name))
@@ -73,24 +91,514 @@ test('publishes only eligible platforms, keeps going after failures, and include
   const states = (outcomes) => outcomes.map(({ state }) => state)
 
   assert.equal(blockingPublication(task.runs, 'weibo'), published)
-  assert.deepEqual(states(await batch(() => ({ loginRequired: true }))), ['login-required', 'already-published'])
-  assert.deepEqual(attempts, ['zhihu'])
+  assert.deepEqual(states(await batch(() => ({ loginRequired: true }))), ['login-required', 'already-published', 'login-required'])
+  assert.deepEqual(attempts, ['zhihu', 'juejin'])
 
   task.runs = clearPublishedRun(task.runs, published)
   assert.deepEqual(task.runs, [zhihuFailure])
   attempts.length = 0
   const retried = await batch((_task, platform) => {
     if (platform === 'zhihu') throw new Error('连接失败')
+    if (platform === 'juejin') return { saved: true, publishNotice: '请补齐分类和标签。' }
     return { published: true }
   })
-  assert.deepEqual(states(retried), ['failed', 'published'])
+  assert.deepEqual(states(retried), ['failed', 'published', 'saved'])
   assert.equal(retried[0].detail, '连接失败')
-  assert.deepEqual(attempts, ['zhihu', 'weibo'])
+  assert.deepEqual(attempts, ['zhihu', 'weibo', 'juejin'])
 
   task.runs = [{ ...zhihuFailure, state: 'publish-uncertain' }, published]
   attempts.length = 0
-  assert.deepEqual(states(await batch(() => assert.fail('unexpected publication'))), ['needs-check', 'already-published'])
+  task.runs.push({ platform: 'juejin', state: 'publish-uncertain' })
+  assert.deepEqual(states(await batch(() => assert.fail('unexpected publication'))), ['needs-check', 'already-published', 'needs-check'])
   assert.deepEqual(attempts, [])
+})
+
+test('checks the Juejin account and reuses only its own draft with the saved publishing fields', async () => {
+  const id = '7325611798135062578'
+  const owner = '254742430764728'
+  let account = null
+  const draft = { id, user_id: owner, article_id: '0', category_id: '123', tag_ids: ['456'], brief_content: '原来的摘要' }
+  const changed = []
+  const requests = []
+  const juejin = new Juejin(async (input, init) => {
+    const url = new URL(input)
+    assert.equal(url.origin, 'https://api.juejin.cn')
+    assert.equal(url.searchParams.get('aid'), '2608')
+    assert.equal(init.credentials, 'include')
+    if (url.pathname.endsWith('/user/get')) return Response.json({ err_no: 0, data: account })
+    const body = JSON.parse(init.body)
+    requests.push([url.pathname, body])
+    if (url.pathname.endsWith('/detail')) return Response.json({ err_no: 0, data: draft })
+    if (url.pathname.endsWith('/update')) return Response.json({ err_no: 0, data: null })
+    if (url.pathname.endsWith('/create')) return Response.json({ err_no: 0, data: { id, user_id: owner } })
+    assert.fail(`Unexpected URL ${url}`)
+  })
+  assert.equal(await juejin.account(), null)
+  account = { user_id: owner, user_name: '测试作者' }
+  assert.equal((await juejin.account()).name, '测试作者')
+  const content = { markdown: '## 正文', summary: '摘要', images: [] }
+  const remember = async (next) => changed.push(next)
+  assert.equal(await juejin.saveDraft(owner, '标题', content, undefined, remember), id)
+  assert.deepEqual(changed, [id])
+  assert.equal(requests[0][1].category_id, '0')
+  assert.deepEqual(requests[0][1].tag_ids, [])
+  assert.equal(await juejin.saveDraft(owner, '标题', content, id, remember), id)
+  assert.equal(requests[2][1].id, id)
+  assert.equal(requests[2][1].mark_content, content.markdown)
+  assert.equal(requests[2][1].brief_content, '原来的摘要')
+  assert.deepEqual(requests[2][1].tag_ids, ['456'])
+  await assert.rejects(juejin.saveDraft('987', '标题', content, id, remember), /无法核对/)
+  assert.equal(requests.length, 4)
+})
+
+test('loads and validates Juejin defaults and saves them with a new draft', async () => {
+  const id = '7325611798135062578'
+  const owner = '254742430764728'
+  const category = { id: '6809637767543259144', name: '前端' }
+  const tag = { id: '6809640408797167623', name: 'JavaScript' }
+  const changed = []
+  const juejin = new Juejin(async (input, init) => {
+    const path = new URL(input).pathname
+    if (path.endsWith('/user/get')) return Response.json({ err_no: 0, data: { user_id: owner, can_tag_cnt: 1 } })
+    if (path.endsWith('/query_category_list')) return Response.json({ err_no: 0, data: [
+      { category: { category_id: category.id, category_name: category.name } },
+    ] })
+    if (path.endsWith('/query_tag_list')) {
+      assert.deepEqual(JSON.parse(init.body), { cursor: '0', key_word: tag.name, limit: 20, sort_type: 1 })
+      return Response.json({ err_no: 0, data: [{ tag: { tag_id: tag.id, tag_name: tag.name } }] })
+    }
+    assert.ok(path.endsWith('/create'))
+    const body = JSON.parse(init.body)
+    assert.equal(body.category_id, category.id)
+    assert.deepEqual(body.tag_ids, [tag.id])
+    assert.equal(body.brief_content, '正文摘要')
+    return Response.json({ err_no: 0, data: { id, user_id: owner } })
+  })
+  const defaults = await juejin.validateDefaults({ category, tags: [tag] }, (await juejin.account()).tagLimit)
+  assert.deepEqual(defaults, { category, tags: [tag] })
+  await assert.rejects(juejin.validateDefaults({ category, tags: [tag] }, 0), /无法添加标签/)
+  await assert.rejects(juejin.validateDefaults({ category, tags: [{ ...tag, id: '456' }] }, 1), /已失效/)
+  assert.equal(parseJuejinDefaults({ category, tags: [tag, tag] }), undefined)
+  assert.equal(await juejin.saveDraft(owner, '标题', { markdown: '正文', summary: '正文摘要', images: [] }, undefined,
+    async (next) => changed.push(next), defaults), id)
+  assert.deepEqual(changed, [id])
+})
+
+test('isolates Juejin defaults by account and retains them across restarts', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'article-relay-juejin-defaults-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const first = { category: { id: '11', name: '前端' }, tags: [{ id: '12', name: 'JavaScript' }] }
+  const second = { category: { id: '21', name: '后端' }, tags: [{ id: '22', name: 'Java' }] }
+  const store = await TaskStore.open(root)
+  assert.equal(await store.juejinDefaults('1'), undefined)
+  await store.saveJuejinDefaults('1', first)
+  await store.saveJuejinDefaults('2', second)
+  const reopened = await TaskStore.open(root)
+  assert.deepEqual(await reopened.juejinDefaults('1'), first)
+  assert.deepEqual(await reopened.juejinDefaults('2'), second)
+  assert.equal(await reopened.juejinDefaults('3'), undefined)
+})
+
+test('reads native Juejin draft details only for the expected owner', async () => {
+  let draftOwner = '123'
+  const juejin = new Juejin(async (input, init) => {
+    const path = new URL(input).pathname
+    assert.ok(path.endsWith('/detail'))
+    assert.deepEqual(JSON.parse(init.body), { draft_id: '456' })
+    return Response.json({ err_no: 0, data: {
+      article_draft: { id: '456', article_id: '0', mark_content: '正文' }, author_user_info: { user_id: draftOwner },
+      category: { category: { category_id: '789' } }, tags: [{ tag_id: '321' }],
+    } })
+  })
+  const draft = await juejin.draft('456', '123')
+  assert.equal(draft.category_id, '789')
+  assert.deepEqual(draft.tag_ids, ['321'])
+  draftOwner = '999'
+  await assert.rejects(juejin.draft('456', '123'), /无法核对/)
+})
+
+test('clears all local Juejin publication attempts while preserving the task, other platforms and other tasks', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'article-relay-juejin-history-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const store = await TaskStore.open(root)
+  const task = await store.findOrCreate('https://mp.weixin.qq.com/s/juejin-history')
+  const other = await store.findOrCreate('https://mp.weixin.qq.com/s/another-article')
+  const attempt = { id: 'pending', platform: 'juejin', owner: '123', account: '掘金账号', startedAt: new Date().toISOString(),
+    state: 'publish-uncertain', draftId: '456', articleId: '789' }
+  const history = [attempt, { ...attempt, id: 'saved', state: 'saved', owner: '999' }, { ...attempt, id: 'failed', state: 'failed' }]
+  const otherPlatform = { ...attempt, id: 'weibo', platform: 'weibo', state: 'published' }
+  const article = { title: '原文', html: '<p>正文</p>', images: [], sourceUrl: task.sourceUrl }
+  await store.update(task.id, { article, runs: [...history, otherPlatform] })
+  await store.update(other.id, { runs: [attempt] })
+
+  await assert.rejects(store.clearJuejinPublicationHistory(task.id, 'weibo'), /无法清理/)
+  await store.update(task.id, { runs: [...history, otherPlatform, { ...attempt, id: 'published', state: 'published' }] })
+  await assert.rejects(store.clearJuejinPublicationHistory(task.id, 'pending'), /无法清理/)
+  await store.update(task.id, { runs: [...history, otherPlatform] })
+  await store.clearJuejinPublicationHistory(task.id, 'pending')
+  const reopened = await TaskStore.open(root)
+  assert.deepEqual(reopened.get(task.id).runs, [otherPlatform])
+  assert.deepEqual(reopened.get(task.id).article, article)
+  assert.deepEqual(reopened.get(other.id).runs, [attempt])
+})
+
+test('requires a publicly accessible Juejin article with the exact draft and article identifiers', async () => {
+  const id = '7099412338641469453'
+  const draftId = '7099392333216481311'
+  const url = `https://juejin.cn/post/${id}`
+  assert.equal(juejinArticleId(`${url}?utm_source=relay`), id)
+  assert.equal(juejinArticleId(`https://juejin.cn/spost/${id}`), undefined)
+  assert.equal(juejinArticleId(`https://juejin.cn.example.com/post/${id}`), undefined)
+  let html = `<article class="article" data-entry-id="${id}" data-draft-id="${draftId}">正文</article>`
+  const juejin = new Juejin(async (address, options) => {
+    assert.equal(address, url)
+    assert.equal(options.credentials, 'omit')
+    assert.equal(options.redirect, 'error')
+    return { ok: true, url: '', text: async () => html }
+  })
+  assert.equal(await juejin.publicArticle(id, draftId), true)
+  assert.equal(await juejin.publicArticle(id, '999'), false)
+  html = `<p>审核中</p><article data-entry-id="${id}"></article>`
+  assert.equal(await juejin.publicArticle(id, draftId), false)
+})
+
+test('uploads each distinct Juejin image through ImageX and passes the native image references to the draft', async () => {
+  const uri = 'tos-cn-i-73owjymdk6/test-picture'
+  const cdn = `https://p3-juejin.byteimg.com/${uri}~tplv-73owjymdk6-image.image`
+  const stages = []
+  const progress = []
+  let reads = 0
+  const juejin = new Juejin(async (input, init) => {
+    const url = new URL(input)
+    if (url.hostname === 'api.juejin.cn') {
+      assert.equal(init.credentials, 'include')
+      if (url.pathname.endsWith('/gen_token')) {
+        stages.push('token')
+        return Response.json({ err_no: 0, data: { token: {
+          AccessKeyId: 'test-id', SecretAccessKey: 'test-secret', SessionToken: 'test-token',
+        } } })
+      }
+      assert.equal(url.searchParams.get('uri'), uri)
+      stages.push('image-url')
+      return Response.json({ err_no: 0, data: { main_url: cdn } })
+    }
+    assert.equal(init.credentials, 'omit')
+    assert.equal(init.redirect, 'error')
+    if (url.hostname === 'imagex.bytedanceapi.com') {
+      assert.match(init.headers.Authorization, /^AWS4-HMAC-SHA256 Credential=test-id\//)
+      if (url.searchParams.get('Action') === 'ApplyImageUpload') {
+        stages.push('apply')
+        return Response.json({ Result: { UploadAddress: {
+          SessionKey: Buffer.from(JSON.stringify({ uploadHost: 'https://unsupported.example' })).toString('base64'),
+          UploadHosts: ['tos-lq-x.bytedancevod.com'],
+          StoreInfos: [{ StoreUri: uri, Auth: 'transfer-token' }],
+        } } })
+      }
+      stages.push('commit')
+      assert.equal(init.method, 'POST')
+      return Response.json({ Result: { Results: [{ UriStatus: 2000 }] } })
+    }
+    stages.push('upload')
+    assert.equal(url.href, `https://tos-lq-x.bytedancevod.com/${uri}`)
+    assert.equal(init.method, 'POST')
+    assert.equal(init.headers.Authorization, 'transfer-token')
+    assert.equal(init.headers['Content-CRC32'], 'cbf43926')
+    assert.equal(Buffer.from(init.body).toString(), '123456789')
+    return new Response(null, { status: 200 })
+  })
+  const content = await juejin.prepareContent({ html: '导入正文', images: ['local-a', 'local-a'] }, async () => {
+    reads++
+    return new Blob(['123456789'], { type: 'image/png' })
+  }, (completed, total) => progress.push([completed, total]), async (html, images) => {
+    assert.equal(html, '导入正文')
+    assert.deepEqual(images, [uri, uri])
+    return { markdown: `![](${uri})`, summary: '导入正文' }
+  })
+  assert.equal(reads, 1)
+  assert.deepEqual(progress, [[0, 1], [1, 1]])
+  assert.deepEqual(stages, ['token', 'apply', 'upload', 'commit', 'image-url'])
+  assert.deepEqual(content.images, [{ pic_uri: uri, pic_url: cdn }])
+})
+
+test('uses the first ImageX upload host across domain families and rejects malformed destinations', async () => {
+  const api = async () => ({ token: { AccessKeyId: 'test-id', SecretAccessKey: 'test-secret', SessionToken: 'test-token' } })
+  const uri = 'tos-cn-i-73owjymdk6/test-picture'
+  const cases = [
+    { hosts: ['https://tos-lf-x-tob.bytecdn.cn/'], expected: `https://tos-lf-x-tob.bytecdn.cn/${uri}` },
+    { hosts: ['https://tos-d-x-lf.douyin.com', 'tos-d-x-hl.snssdk.com'],
+      expected: `https://tos-d-x-lf.douyin.com/${uri}` },
+    { hosts: ['tos-lq-x.bytedancevod.com'], expected: `https://tos-lq-x.bytedancevod.com/${uri}` },
+    { hosts: ['upload-test.net'], expected: `https://upload-test.net/${uri}` },
+    ...[undefined, [], ['https://user@upload-test.net'], ['http://upload-test.net'], ['upload-test.net:8080'],
+      ['upload-test.net/redirect'], ['upload-test.net?token=private'], ['127.0.0.1'], ['[::1]'], ['app.localhost'],
+      ['unsupported.example', 'tos-d-x-hl.snssdk.com']].map((hosts) => ({ hosts })),
+  ]
+  const sessionKey = Buffer.from(JSON.stringify({ uploadHost: 'tos-d-x-hl.snssdk.com' })).toString('base64')
+  for (const { hosts, expected } of cases) {
+    const calls = []
+    const request = async (input, init) => {
+      calls.push(input)
+      if (calls.length === 1) return Response.json({ Result: { UploadAddress: {
+        UploadHosts: hosts, SessionKey: sessionKey, StoreInfos: [{ StoreUri: uri, Auth: 'transfer-token' }],
+      } } })
+      assert.equal(input, expected)
+      assert.equal(init.redirect, 'error')
+      return new Response(null, { status: 500 })
+    }
+    await assert.rejects(uploadJuejinImage(api, request, new Blob(['test'])),
+      expected ? /图片上传失败（HTTP 500）/ : /ImageX 未返回有效的 HTTPS 上传主机/)
+    assert.equal(calls.length, expected ? 2 : 1)
+  }
+})
+
+test('uses different ImageX upload hosts per image and leaves an invalid fourth image unconfirmed', async () => {
+  const progress = []
+  const hosts = ['tos-d-x-hl.snssdk.com', 'tos-d-x-lf.douyin.com', 'tos-lq-x.bytedancevod.com', '127.0.0.1']
+  const uploadedHosts = []
+  let image = 0
+  const juejin = new Juejin(async (input) => {
+    const url = new URL(input)
+    if (url.pathname.endsWith('/gen_token')) {
+      image++
+      return Response.json({ err_no: 0, data: { token: {
+        AccessKeyId: 'test-id', SecretAccessKey: 'test-secret', SessionToken: 'test-token',
+      } } })
+    }
+    if (url.searchParams.get('Action') === 'ApplyImageUpload') {
+      return Response.json({ Result: { UploadAddress: {
+        SessionKey: 'opaque', UploadHosts: [hosts[image - 1]],
+        StoreInfos: [{ StoreUri: `tos-cn-i-73owjymdk6/test-${image}`, Auth: 'transfer-token' }],
+      } } })
+    }
+    assert.ok(image < 4)
+    if (url.searchParams.get('Action') === 'CommitImageUpload') {
+      return Response.json({ Result: { Results: [{ UriStatus: 2000 }] } })
+    }
+    if (url.pathname.endsWith('/get_img_url')) {
+      return Response.json({ err_no: 0, data: { main_url: `https://p3-juejin.byteimg.com/tos-cn-i-73owjymdk6/test-${image}` } })
+    }
+    uploadedHosts.push(url.hostname)
+    return new Response(null, { status: 200 })
+  })
+  await assert.rejects(juejin.prepareContent({ html: '', images: ['1', '2', '3', '4'] }, async () => new Blob(['test']),
+    (completed, total) => progress.push([completed, total]), async () => assert.fail('正文转换应在全部图片确认后开始')),
+  /第 4\/4 张图片失败，已确认 3 张.*ImageX 未返回有效的 HTTPS 上传主机/)
+  assert.deepEqual(progress, [[0, 4], [1, 4], [2, 4], [3, 4]])
+  assert.deepEqual(uploadedHosts, hosts.slice(0, 3))
+})
+
+test('matches Juejin creator history by draft identifier and reports the audit status', async () => {
+  const owner = '123456'
+  const juejin = new Juejin(async (input) => {
+    const path = new URL(input).pathname
+    if (path.endsWith('/user/get')) return Response.json({ err_no: 0, data: { user_id: owner } })
+    if (path.endsWith('/detail')) return Response.json({ err_no: 0, data: { id: '111', user_id: owner, article_id: '0' } })
+    assert.ok(path.endsWith('/list_by_user'))
+    return Response.json({ err_no: 0, data: [
+      { article_info: { article_id: '999', draft_id: '222', audit_status: 2 } },
+      { article_info: { article_id: '333', draft_id: '111', audit_status: 1 } },
+    ] })
+  })
+  assert.deepEqual(await juejin.findArticle('111', owner), { id: '333', status: '审核中', audit: 'reviewing' })
+})
+
+test('extracts a Juejin publish error only from the current draft and keeps only safe diagnostics', async () => {
+  const debuggerClient = new EventEmitter()
+  let attached = false
+  const inspected = []
+  Object.assign(debuggerClient, {
+    isAttached: () => attached,
+    attach: () => { attached = true },
+    detach: () => { attached = false },
+    async sendCommand(method, params) {
+      if (method === 'Network.enable') return {}
+      assert.equal(method, 'Network.getResponseBody')
+      inspected.push(params.requestId)
+      return { base64Encoded: true, body: Buffer.from(JSON.stringify({
+        err_no: 123, err_msg: '发布受限 https://example.com/?token=hidden cookie=secret', data: { content: '隐藏正文' },
+      })).toString('base64') }
+    },
+  })
+  const url = 'https://api.juejin.cn/content_api/v1/article/publish?aid=2608'
+  const observer = monitorJuejinPublishResponse(debuggerClient, '456')
+  await observer.start()
+  const emit = (method, args) => debuggerClient.emit('message', {}, `Network.${method}`, args)
+  for (const [requestId, method, address, draftId] of [
+    ['other-draft', 'POST', url, '999'], ['preflight', 'OPTIONS', url, '456'],
+    ['other-host', 'POST', url.replace('api.juejin.cn', 'api.juejin.cn.example.org'), '456'], ['publish', 'POST', url, '456'],
+  ]) {
+    emit('requestWillBeSent', { requestId, request: { url: address, method, postData: JSON.stringify({ draft_id: draftId }) } })
+    emit('responseReceived', { requestId, response: { url: address, status: 200 } })
+    emit('loadingFinished', { requestId })
+  }
+  await Promise.resolve()
+  observer.close()
+  assert.deepEqual(inspected, ['publish'])
+  const diagnostic = observer.diagnostic()
+  assert.equal(diagnostic.rejected, true)
+  assert.match(diagnostic.notice, /HTTP 200，业务码 123.*发布受限 〔链接〕 〔凭证〕/)
+  assert.doesNotMatch(diagnostic.notice, /hidden|secret|隐藏正文/)
+  assert.equal(debuggerClient.listenerCount('message'), 0)
+  assert.equal(attached, false)
+})
+
+test('distinguishes a verified Juejin review preview, an explicit rejection, and a public article', async () => {
+  const draft = '111'
+  const article = '222'
+  const owner = '333'
+  const markup = `<article data-entry-id="${article}" data-draft-id="${draft}">正文</article>`
+  let auditStatus
+  let preview = markup
+  let publicStatus = 404
+  let previewReads = 0
+  const juejin = new Juejin(async (input, init) => {
+    const path = new URL(input).pathname
+    if (path === `/post/${article}`) {
+      assert.equal(init.credentials, 'omit')
+      return new Response(markup, { status: publicStatus })
+    }
+    if (path === `/spost/${article}`) {
+      assert.equal(init.credentials, 'include')
+      assert.equal(init.redirect, 'error')
+      previewReads++
+      return new Response(preview)
+    }
+    if (path.endsWith('/user/get')) return Response.json({ err_no: 0, data: { user_id: owner } })
+    if (path.endsWith('/detail')) return Response.json({ err_no: 0, data: { id: draft, user_id: owner, article_id: article } })
+    assert.ok(path.endsWith('/list_by_user'))
+    return Response.json({ err_no: 0, data: auditStatus === undefined ? [] : [
+      { article_info: { article_id: article, draft_id: draft, audit_status: auditStatus } },
+    ] })
+  })
+  assert.deepEqual(await juejin.publicationStatus(draft, owner, article), { id: article, audit: 'reviewing', status: '审核中' })
+  assert.equal(previewReads, 1)
+  assert.deepEqual(await juejin.publicationStatus(draft, '987', article), {})
+  assert.equal(previewReads, 1)
+  preview = markup.replace(`data-draft-id="${draft}"`, 'data-draft-id="999"')
+  assert.deepEqual(await juejin.publicationStatus(draft, owner), { id: article })
+  auditStatus = -1
+  assert.deepEqual(await juejin.publicationStatus(draft, owner, article), { id: article, audit: 'rejected', status: '审核未通过' })
+  assert.equal(previewReads, 2)
+  publicStatus = 200
+  assert.deepEqual(await juejin.publicationStatus(draft, owner, article), { id: article, url: `https://juejin.cn/post/${article}` })
+})
+
+test('checks Juejin audits after 30 seconds and every minute until a manual check or window close', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const first = { taskId: 'task', runId: 'first' }
+  const second = { taskId: 'task', runId: 'second' }
+  const checked = []
+  let finishSecond
+  const monitor = monitorJuejinAudits(async (target) => {
+    checked.push(target.runId)
+    if (target === second) await new Promise((resolve) => { finishSecond = resolve })
+  })
+  monitor.sync([first])
+  t.mock.timers.tick(29_999)
+  assert.deepEqual(checked, [])
+  t.mock.timers.tick(1)
+  await Promise.resolve()
+  assert.deepEqual(checked, ['first'])
+  monitor.sync([first, second])
+  t.mock.timers.tick(30_000)
+  assert.deepEqual(checked, ['first', 'second'])
+  monitor.sync([first])
+  finishSecond()
+  await Promise.resolve()
+  t.mock.timers.tick(30_000)
+  await Promise.resolve()
+  assert.deepEqual(checked, ['first', 'second', 'first'])
+  monitor.close()
+  monitor.sync([first, second])
+  t.mock.timers.tick(120_000)
+  assert.deepEqual(checked, ['first', 'second', 'first'])
+})
+
+test('keeps Juejin audit tracking disabled after reopening a manually checked record', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'article-relay-juejin-audit-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const store = await TaskStore.open(root)
+  const task = await store.findOrCreate('https://mp.weixin.qq.com/s/review')
+  const run = { id: 'run', platform: 'juejin', owner: '123', account: '掘金账号', startedAt: new Date().toISOString(),
+    draftId: '456', state: 'publish-uncertain', juejinAudit: 'reviewing' }
+  assert.equal(canCheckJuejinAudit(run), true)
+  assert.equal(blockingPublication([run], 'juejin'), run)
+  assert.equal(canCheckJuejinAudit({ ...run, juejinAudit: 'rejected' }), false)
+  assert.equal(canCheckJuejinAudit({ ...run, state: 'published' }), false)
+  await store.update(task.id, { runs: [{ ...run, juejinAutoCheckStopped: true }] })
+  const reopened = await TaskStore.open(root)
+  const restored = reopened.get(task.id).runs[0]
+  assert.equal(restored.juejinAutoCheckStopped, true)
+  assert.equal(canCheckJuejinAudit(restored), false)
+})
+
+test('hides the draft action for submitted or published drafts, including older attempts', () => {
+  const saved = { id: 'saved', platform: 'juejin', draftId: '456', state: 'saved' }
+  const opened = { ...saved, id: 'current', state: 'publish-uncertain', manualHandoff: true }
+  assert.equal(canOpenDraft(saved, [saved]), true)
+  assert.equal(canOpenDraft(opened, [opened, saved]), true)
+  const reviewing = { ...opened, articleId: '789', juejinAudit: 'reviewing' }
+  assert.equal(canOpenDraft(reviewing, [reviewing, saved]), false)
+  assert.equal(canOpenDraft(saved, [reviewing, saved]), false)
+  const published = { ...reviewing, id: 'published', state: 'published', juejinAudit: undefined }
+  assert.equal(canOpenDraft(opened, [published, opened]), false)
+  assert.equal(canOpenDraft(opened, [{ ...published, draftId: '999' }, opened]), true)
+  const task = { images: [], runs: [reviewing, saved] }
+  assert.deepEqual(taskSummary(task).runs.map(({ canOpenDraft }) => canOpenDraft), [false, false])
+})
+
+test('clicks only the exact Juejin draft controls and treats losing the reply as an uncertain submission', async () => {
+  const id = '7325611798135062578'
+  const articleId = '7327100727163174950'
+  const draft = juejinDraftUrl(id)
+  const defaults = { category: { id: '456', name: '前端' }, tags: [{ id: '789', name: 'JavaScript' }] }
+  for (const behavior of ['redirect', 'redirect-after-abort', 'published-route', 'unknown', 'unavailable', 'other-draft',
+    'wrong-owner', 'wrong-title', 'missing-defaults', 'short-summary']) {
+    let url = ''
+    let opened = false
+    let resultReads = 0
+    const clicks = []
+    const post = { id, title: behavior === 'wrong-title' ? '另一篇文章' : '标题', markdown: '## 正文',
+      category: { id: '0' }, tags: [], brief_content: '摘要'.repeat(behavior === 'short-summary' ? 5 : 25) }
+    const popup = { post, userId: behavior === 'wrong-owner' ? '999' : '123', isDraft: true, canPublish: true, tagLimit: 1,
+      categoryList: [{ id: defaults.category.id, title: defaults.category.name }],
+      handleTagsChange(tags) { post.tags = Array.from(tags, (tag) => ({ ...tag })) },
+    }
+    const controls = [false, true].filter((confirm) => !confirm || behavior !== 'unavailable').map((confirm) => ({
+      textContent: confirm ? '确定并发布' : '发布', closest: () => confirm,
+      getClientRects: () => confirm && !opened ? [] : [{}], getAttribute: () => null,
+      click() {
+        clicks.push(confirm)
+        if (!confirm) { opened = true; return }
+        assert.deepEqual(post.category, popup.categoryList[0])
+        assert.deepEqual(post.tags, [{ id: '789', title: 'JavaScript' }])
+        if (behavior === 'unknown') throw new Error('导航中断')
+        url = behavior === 'published-route' ? 'https://juejin.cn/published/?source=editor' : `https://juejin.cn/spost/${articleId}`
+        if (behavior === 'redirect-after-abort') throw new Error('导航中断')
+      },
+    }))
+    const page = {
+      async loadURL(address) { url = behavior === 'other-draft' ? juejinDraftUrl('123') : address },
+      getURL() { return url },
+      async executeJavaScript(script) {
+        if (script.includes("sessionStorage.getItem('PUB_INFO')")) {
+          if (resultReads++ === 0) throw new Error('结果页面正在加载')
+          return articleId
+        }
+        assert.ok(script.includes(draft))
+        return runInNewContext(script, {
+          location: new URL(url), document: { querySelector: () => ({ __vue__: popup, querySelectorAll: () => controls }) },
+        })
+      },
+    }
+    const result = await publishJuejinDraft(page, id, { owner: '123', title: '标题',
+      defaults: behavior === 'missing-defaults' ? undefined : defaults }, { waitMs: 240, resultWaitMs: 450 })
+    const confirmed = ['redirect', 'redirect-after-abort', 'published-route'].includes(behavior)
+    assert.equal(result.submitted, confirmed || behavior === 'unknown')
+    assert.equal(result.articleId, confirmed ? articleId : undefined)
+    assert.deepEqual(clicks, ['other-draft', 'wrong-owner', 'wrong-title'].includes(behavior) ? [] :
+      confirmed || behavior === 'unknown' ? [false, true] : [false])
+  }
 })
 
 test('accepts missing-article status only from the exact, non-redirected publication URL', async () => {
@@ -191,7 +699,7 @@ test('uses the exact Weibo draft ID and published status from the account histor
 })
 
 test('resolves published Weibo links without confusing same-title posts from different times or accounts', async () => {
-  const title = '同名文章'
+  const title = '这种"自由"为什么还没被广泛接受？'
   const first = '2309405369125521719456'
   const second = '2309405369127853752547'
   const articleUrl = (id) => `https://weibo.com/ttarticle/p/show?id=${id}`
@@ -199,7 +707,7 @@ test('resolves published Weibo links without confusing same-title posts from dif
     user: { idstr: owner },
     created_at: `Wed Nov 25 ${time} +0800 2026`,
     page_info: { object_type: 'article', page_id: id },
-    url_struct: [{ url_title: title, page_id: id, long_url: articleUrl(id) }],
+    url_struct: [{ url_title: title.replaceAll('"', '″'), page_id: id, long_url: articleUrl(id) }],
   })
   const adapter = new Weibo(async (address, init) => {
     const url = new URL(address)
@@ -228,7 +736,7 @@ test('resolves published Weibo links without confusing same-title posts from dif
 test('submits a Weibo draft only within its publish settings and confirms the public article separately', async (t) => {
   const draftId = '123'
   const articleUrl = 'https://weibo.com/ttarticle/p/show?id=2309404803154729631808'
-  const title = '图文标题'
+  const title = '带"引号"的图文标题'
   const owner = '90'
 
   function editor({ articleAuthor = owner, settings = true, navigate = true, interrupted = false, history = false } = {}) {
@@ -276,7 +784,7 @@ test('submits a Weibo draft only within its publish settings and confirms the pu
           document: {
             body,
             querySelector: (selector) => selector === '[node-type="articleTitle"]'
-              ? url === articleUrl ? { textContent: title, parentElement: { querySelector: () => author } } : null
+              ? url === articleUrl ? { textContent: title.replaceAll('"', '″'), parentElement: { querySelector: () => author } } : null
               : historyOpen ? null : { ...visible, value: title },
             querySelectorAll: (selector) => {
               if (selector.startsWith('button,')) return historyOpen ? [] : settingsOpen ? [next, publish, unrelated] : [next, unrelated]
@@ -325,7 +833,7 @@ test('submits a Weibo draft only within its publish settings and confirms the pu
 test('submits only recognized Zhihu publication controls and requires a matching article page', async (t) => {
   const id = '123'
   const publicUrl = 'https://zhuanlan.zhihu.com/p/123'
-  function editor({ confirm = false, resultUrl, modalLabel, abortAfterClick = false, successToast = false } = {}) {
+  function editor({ confirm = false, resultUrl, modalLabel, abortAfterClick = false, successToast = false, notice } = {}) {
     let url
     let dialogOpen = Boolean(modalLabel)
     const clicks = []
@@ -354,7 +862,10 @@ test('submits only recognized Zhihu publication controls and requires a matching
           document: {
             querySelectorAll: (selector) => {
               if (selector === 'button') return [publish, settings, ...(dialogOpen ? [confirmation] : [])]
-              if (selector.startsWith('.Toast')) return successToast && clicks.length ? [{ textContent: '文章发布成功' }] : []
+              if (selector.startsWith('.Toast')) {
+                const textContent = successToast ? '文章发布成功' : clicks.length >= (confirm ? 2 : 1) ? notice : undefined
+                return textContent && clicks.length ? [{ ...visible, textContent }] : []
+              }
               return dialogOpen ? [dialog] : []
             },
             querySelector: () => url === publicUrl ? {} : null,
@@ -388,6 +899,11 @@ test('submits only recognized Zhihu publication controls and requires a matching
   await t.test('never repeats a submission when it cannot be confirmed', async () => {
     const page = editor()
     assert.equal(await publishZhihuDraft(page, id, 300), 'uncertain')
+    assert.deepEqual(page.clicks, ['发布'])
+  })
+  await t.test('recognizes the 24-hour rate limit and stops after the first submission', async () => {
+    const page = editor({ notice: '近期发布频率过高，请 24 小时后重试~' })
+    assert.equal(await publishZhihuDraft(page, id, 1000), 'rate-limited')
     assert.deepEqual(page.clicks, ['发布'])
   })
   await t.test('rejects an unexpected article URL as publication evidence', async () => {

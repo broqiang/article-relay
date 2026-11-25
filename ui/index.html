@@ -13,6 +13,7 @@
     <img class="brand-mark" src="icon.svg" alt="" width="38" height="38">
     <h1>文章同步</h1>
     <div class="app-actions">
+      <a class="help-link quiet" href="help.html" target="_blank" rel="noopener" aria-label="帮助（在新窗口打开）">帮助</a>
       <button id="open-releases" type="button" class="release-link" title="查看 GitHub 发布页" hidden>
         <svg class="button-icon" aria-hidden="true"><use href="button-icons.svg#tag"></use></svg>
         <span id="app-version"></span>
@@ -41,7 +42,10 @@
         <small id="account-summary">正在检查登录状态…</small>
       </button>
       <section class="task-section" aria-labelledby="task-list-heading">
-        <h2 id="task-list-heading">文章任务</h2>
+        <div class="task-section-heading">
+          <h2 id="task-list-heading">文章任务</h2>
+          <button id="open-import" type="button" class="primary"><svg class="button-icon" aria-hidden="true"><use href="button-icons.svg#import"></use></svg>导入文章</button>
+        </div>
         <p class="muted" id="no-tasks">暂无记录</p>
         <ul class="task-list" id="task-list"></ul>
       </section>
@@ -56,15 +60,11 @@
         </div>
       </div>
       <div class="stage-content" id="article-workspace">
-        <section class="panel" aria-labelledby="source-heading">
-          <h3 id="source-heading">公众号原文</h3>
-          <form id="source-form">
-            <input id="source-url" aria-label="公众号文章链接" type="url" placeholder="粘贴微信公众号文章链接" required>
-            <button type="submit" class="secondary"><svg class="button-icon" aria-hidden="true"><use href="button-icons.svg#import"></use></svg>导入文章</button>
-          </form>
+        <section class="panel" aria-label="文章详情">
+          <p id="no-article" class="muted">点击左侧「导入文章」添加公众号文章。</p>
           <div id="summary" class="summary" hidden>
             <div class="article-heading">
-              <h4 id="task-title"></h4>
+              <h3 id="task-title"></h3>
               <span class="result-status" id="task-status"></span>
             </div>
             <p class="source-link muted" id="task-source"></p>
@@ -85,6 +85,18 @@
           <div id="platform-list"></div>
         </section>
       </div>
+      <div class="stage-content" id="import-workspace" hidden>
+        <div class="panel import-panel">
+          <form id="source-form">
+            <label for="source-url">微信公众号文章链接</label>
+            <input id="source-url" type="url" placeholder="粘贴微信公众号文章链接" required>
+            <p id="import-status" class="status" role="status"></p>
+            <div class="result-actions">
+              <button type="submit" class="primary">导入文章</button>
+            </div>
+          </form>
+        </div>
+      </div>
       <div class="stage-content" id="accounts-workspace" hidden>
         <section class="panel" aria-labelledby="accounts-heading">
           <h3 id="accounts-heading">账号列表</h3>
@@ -94,5 +106,33 @@
       </div>
     </section>
   </main>
+  <dialog id="juejin-defaults-dialog" aria-labelledby="juejin-defaults-heading" aria-describedby="juejin-defaults-account">
+    <form id="juejin-defaults-form">
+      <header class="juejin-defaults-header">
+        <h3 id="juejin-defaults-heading" tabindex="-1" autofocus>掘金发布默认值</h3>
+        <p id="juejin-defaults-account" class="muted"></p>
+      </header>
+      <div class="juejin-defaults-body">
+        <div class="juejin-defaults-field">
+          <label for="juejin-category">默认分类</label>
+          <select id="juejin-category" required></select>
+        </div>
+        <div class="juejin-defaults-field">
+          <label for="juejin-tag-query">默认标签</label>
+          <div id="juejin-selected-tags" class="juejin-tag-list" role="group" aria-label="已选标签"></div>
+          <div class="juejin-tag-search">
+            <input id="juejin-tag-query" type="search" placeholder="输入标签名称" maxlength="100">
+            <button id="juejin-search-tags" type="button" class="secondary"><svg class="button-icon" aria-hidden="true"><use href="button-icons.svg#search"></use></svg>搜索</button>
+          </div>
+          <div id="juejin-tag-results" class="juejin-tag-list" role="group" aria-label="标签搜索结果"></div>
+        </div>
+        <p id="juejin-defaults-status" class="status" role="status"></p>
+      </div>
+      <footer class="juejin-defaults-footer">
+        <button id="juejin-close-defaults" type="button" class="quiet">取消</button>
+        <button id="juejin-save-defaults" type="submit" class="primary">保存</button>
+      </footer>
+    </form>
+  </dialog>
 </body>
 </html>

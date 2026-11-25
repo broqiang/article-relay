@@ -35,6 +35,9 @@
   <symbol id="check" viewBox="0 0 24 24">
     <path d="m5 12 4 4L19 6"/>
   </symbol>
+  <symbol id="close" viewBox="0 0 24 24">
+    <path d="m6 6 12 12M18 6 6 18"/>
+  </symbol>
   <symbol id="link" viewBox="0 0 24 24">
     <path d="M10 13a4 4 0 0 0 6 0l4-4a4 4 0 0 0-6-6l-2 2m2 6a4 4 0 0 0-6 0l-4 4a4 4 0 0 0 6 6l2-2"/>
   </symbol>
