@@ -46,7 +46,7 @@ function renderScreen() {
   byId('accounts-workspace').hidden = !managing || Boolean(browserLabel)
   byId('browser-status').hidden = !browserLabel
   byId('back').hidden = !browserLabel && !managing
-  byId('back').textContent = browserLabel && managing ? '返回账号列表' : '返回工作区'
+  byId('back-label').textContent = browserLabel && managing ? '返回账号列表' : '返回工作区'
   if (managing) byId('open-accounts').setAttribute('aria-current', 'page')
   else byId('open-accounts').removeAttribute('aria-current')
   renderMessage()
@@ -59,8 +59,20 @@ function element(tag, text, className) {
   return node
 }
 
-function button(label, className, handler) {
+function buttonIcon(name) {
+  const namespace = 'http://www.w3.org/2000/svg'
+  const icon = document.createElementNS(namespace, 'svg')
+  icon.classList.add('button-icon')
+  icon.setAttribute('aria-hidden', 'true')
+  const use = document.createElementNS(namespace, 'use')
+  use.setAttribute('href', `button-icons.svg#${name}`)
+  icon.append(use)
+  return icon
+}
+
+function button(icon, label, className, handler) {
   const control = element('button', label, className)
+  control.prepend(buttonIcon(icon))
   control.type = 'button'
   control.disabled = busy
   control.addEventListener('click', handler)
@@ -93,7 +105,7 @@ function taskLabel(task) {
 }
 
 function renderControls(task) {
-  document.querySelectorAll('button, input').forEach((control) => { control.disabled = busy })
+  document.querySelectorAll('.workspace button, .workspace input, #restart').forEach((control) => { control.disabled = busy })
   const ready = task?.importState === 'ready'
   const canPublish = ready && platformEntries.some(([id]) => {
     const run = platformRun(task.runs.filter((item) => item.platform === id))
@@ -136,8 +148,8 @@ function renderAccounts() {
     if (account.name) identity.append(element('small', account.name, 'muted'))
     const actions = element('div', '', 'platform-actions')
     actions.append(
-      button(account.state === 'signedOut' ? '登录' : `打开${platform.name}`, 'secondary', () => void runAction(() => openAccount(id))),
-      button('检查登录', 'quiet', () => void runAction(async () => {
+      button('login', account.state === 'signedOut' ? '登录' : `打开${platform.name}`, 'secondary', () => void runAction(() => openAccount(id))),
+      button('search', '检查登录', 'quiet', () => void runAction(async () => {
         message(`正在检查${platform.name}登录状态…`)
         const name = await checkAccount(id)
         message(name ? `${platform.name}已登录。` : `${platform.name}尚未登录。`)
@@ -172,17 +184,17 @@ function runInformation(task, run, platform, pendingLinks) {
     item.draftId === run.draftId && ['publishing', 'published', 'publish-uncertain'].includes(item.state))
   if (run.draftId && !run.draftMissing && run.error &&
       ((run.state === 'saved' && !closed) || (run.state === 'publish-uncertain' && run.manualHandoff))) {
-    actions.append(button('打开平台草稿', 'secondary', () => void runAction(() => relay.showDraft(task.id, run.id))))
+    actions.append(button('document', '打开平台草稿', 'secondary', () => void runAction(() => relay.showDraft(task.id, run.id))))
   }
   if (run.state === 'publish-uncertain' && run.platform === 'zhihu' && run.draftId) {
-    actions.append(button('标记已发布', 'quiet', () => void runAction(async () => {
+    actions.append(button('check', '标记已发布', 'quiet', () => void runAction(async () => {
       if (window.confirm('确认已在知乎看到这篇文章公开发布？')) {
         await showPublishResult(await relay.markPublished(task.id, run.id), run.platform)
       }
     })))
   }
   if (run.state === 'published' && run.draftId) {
-    actions.append(button('删除本地发布记录', 'quiet danger', () => void runAction(async () => {
+    actions.append(button('trash', '删除本地发布记录', 'quiet danger delete-publication', () => void runAction(async () => {
       if (!window.confirm(`核对${platform.name}已删除这篇文章后，清理该平台的本地发布记录？清理后可以再次发布。`)) return
       await relay.deletePublication(task.id, run.id)
       message(`${platform.name}的本地发布记录已删除，可以再次发布。`)
@@ -200,6 +212,7 @@ function runInformation(task, run, platform, pendingLinks) {
     input.dataset.runId = run.id
     input.value = pendingLinks.get(run.id) || ''
     const submit = element('button', '核对链接', 'secondary')
+    submit.prepend(buttonIcon('link'))
     submit.type = 'submit'
     form.append(input, submit)
     form.addEventListener('submit', (event) => {
@@ -212,9 +225,9 @@ function runInformation(task, run, platform, pendingLinks) {
 }
 
 function articleButton(task, run) {
-  const label = run.state === 'publish-uncertain' ? '核对结果' :
-    run.platform === 'weibo' && !run.publishedUrl ? '查找文章链接' : '查看文章'
-  return button(label, 'secondary', () => void runAction(async () =>
+  const [icon, label] = run.state === 'publish-uncertain' ? ['search', '核对结果'] :
+    run.platform === 'weibo' && !run.publishedUrl ? ['link', '查找文章链接'] : ['document', '查看文章']
+  return button(icon, label, 'secondary', () => void runAction(async () =>
     showPublishResult(await relay.showArticle(task.id, run.id), run.platform)))
 }
 
@@ -222,10 +235,10 @@ function platformAction(task, id, run) {
   if (run && ['published', 'publish-uncertain'].includes(run.state) && run.draftId) return articleButton(task, run)
   if (run && ['running', 'publishing', 'publish-uncertain', 'published'].includes(run.state)) return
   if (accounts[id].state === 'signedOut') {
-    return button('登录', 'secondary', () => void runAction(() => openAccount(id)))
+    return button('login', '登录', 'secondary', () => void runAction(() => openAccount(id)))
   }
-  const label = run?.state === 'failed' || run?.state === 'saved' ? '重试发布' : '发布'
-  const publish = button(label, 'secondary', () => void runAction(async () =>
+  const retry = run?.state === 'failed' || run?.state === 'saved'
+  const publish = button(retry ? 'restart' : 'publish', retry ? '重试发布' : '发布', 'secondary', () => void runAction(async () =>
     showPublishResult(await relay.publishArticle(task.id, id), id)))
   publish.dataset.requiresImport = ''
   return publish
@@ -239,6 +252,7 @@ function renderPlatforms(task) {
     const runs = task.runs.filter((run) => run.platform === id)
     const current = platformRun(runs)
     const row = element('article', '', 'platform-row')
+    const content = element('div', '', 'platform-row-content')
     const header = element('div', '', 'platform-row-heading')
     const identity = element('div', '', 'platform-identity')
     const account = current?.account && current.account !== '账号未确认' ? current.account :
@@ -250,10 +264,11 @@ function renderPlatforms(task) {
     const primary = platformAction(task, id, current)
     actions.append(element('span', label, `run-state ${state || ''}`))
     if (primary) actions.append(primary)
-    header.append(platformIcon(platform), identity, actions)
-    row.append(header)
+    header.append(identity, actions)
+    content.append(header)
+    row.append(platformIcon(platform), content)
 
-    if (current?.error && state !== 'published') row.append(element('p', current.error, 'platform-note run-error'))
+    if (current?.error && state !== 'published') content.append(element('p', current.error, 'platform-note run-error'))
     if (runs.length) {
       const details = document.createElement('details')
       details.dataset.detailsKey = current.id
@@ -274,7 +289,7 @@ function renderPlatforms(task) {
         }
         details.append(history)
       }
-      row.append(details)
+      content.append(details)
     }
     return row
   }))
@@ -287,7 +302,7 @@ function render() {
   list.replaceChildren()
   for (const item of tasks) {
     const row = document.createElement('li')
-    const control = button('', 'task-button', () => void runAction(async () => {
+    const control = button('document', '', 'task-button', () => void runAction(async () => {
       selectedId = item.id
       screen = 'article'
       message('')
@@ -438,10 +453,39 @@ byId('back').addEventListener('click', () => void runAction(async () => {
   await relay.hideBrowser()
   if (loginPlatform) void checkAccount(loginPlatform).catch(() => {})
 }))
-byId('open-releases').addEventListener('click', () => void runAction(() => relay.openReleases()))
-byId('restart').addEventListener('click', () => void runAction(() => relay.restart()))
-
 if (relay) {
+  const releaseLink = byId('open-releases')
+  releaseLink.addEventListener('click', () => {
+    void relay.openReleases().catch((error) => message(errorText(error), true))
+  })
+  const repository = byId('open-repository')
+  repository.disabled = false
+  repository.addEventListener('click', () => {
+    void relay.openRepository().catch((error) => message(errorText(error), true))
+  })
+
+  const settings = byId('settings-popover')
+  const settingsStatus = byId('settings-status')
+  byId('open-settings').disabled = false
+  settings.addEventListener('beforetoggle', (event) => {
+    if (event.newState === 'open') settingsStatus.textContent = ''
+  })
+  settings.addEventListener('toggle', (event) => {
+    const open = event.newState === 'open'
+    void relay.setSettingsOpen(open).catch((error) => {
+      if (open) settings.hidePopover()
+      message(errorText(error), true)
+    })
+  })
+  byId('restart').addEventListener('click', () => void runAction(async () => {
+    settingsStatus.textContent = ''
+    try {
+      await relay.restart()
+    } catch (error) {
+      settingsStatus.textContent = errorText(error)
+    }
+  }))
+
   relay.onProgress((taskId, label) => {
     if (taskId !== selectedId) return
     message(label)
@@ -458,11 +502,14 @@ if (relay) {
   relay.onTasksChanged(updateTasks)
   void runAction(async () => updateTasks(await relay.listTasks()))
   void relay.getVersion().then((version) => {
-    byId('app-version').textContent = `版本 ${version}`
-  }).catch(() => { byId('app-version').textContent = '版本未读取' })
+    byId('app-version').textContent = `v${version}`
+    releaseLink.hidden = false
+    return relay.hasUpdate()
+  }).then((hasUpdate) => {
+    byId('update-badge').hidden = !hasUpdate
+  }).catch(() => {})
   for (const [id] of platformEntries) void checkAccount(id).catch(() => {})
 } else {
-  byId('app-version').textContent = '版本未读取'
   busy = true
   for (const [id] of platformEntries) accounts[id] = { state: 'unknown' }
   message('应用连接未能启动，请关闭并重新打开应用。', true)

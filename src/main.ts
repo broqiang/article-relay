@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, protocol, session, shell, type Session, WebContentsView } from 'electron'
+import { app, BrowserWindow, ipcMain, net, protocol, session, shell, type Session, WebContentsView } from 'electron'
 import { randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -13,15 +13,49 @@ import { checkZhihuArticle, publishZhihuDraft, type PublishResult } from './zhih
 
 const workspaceUrl = 'relay://workspace/index.html'
 const zhihuLoginUrl = 'https://www.zhihu.com/signin'
-const releasesUrl = 'https://github.com/broqiang/article-relay/releases'
+const repositoryUrl = 'https://github.com/broqiang/article-relay'
+const releasesUrl = `${repositoryUrl}/releases`
+const latestReleaseUrl = 'https://api.github.com/repos/broqiang/article-relay/releases/latest'
 const workspaceAssets = new Map([
   ['/index.html', 'text/html; charset=utf-8'],
   ['/styles.css', 'text/css; charset=utf-8'],
   ['/app.js', 'text/javascript; charset=utf-8'],
   ['/icon.svg', 'image/svg+xml; charset=utf-8'],
+  ['/github.svg', 'image/svg+xml; charset=utf-8'],
+  ['/button-icons.svg', 'image/svg+xml; charset=utf-8'],
   ['/zhihu.ico', 'image/vnd.microsoft.icon'],
   ['/weibo.ico', 'image/vnd.microsoft.icon'],
 ])
+
+async function hasUpdate(currentVersion: string): Promise<boolean> {
+  const response = await net.fetch(latestReleaseUrl, {
+    headers: { Accept: 'application/vnd.github+json' },
+    credentials: 'omit',
+    signal: AbortSignal.timeout(5000),
+  })
+  if (!response.ok) return false
+
+  const { tag_name: latestVersion } = await response.json() as { tag_name?: unknown }
+  const versionPattern = /^v?(\d+)\.(\d+)\.(\d+)$/
+  const current = versionPattern.exec(currentVersion)
+  const latest = typeof latestVersion === 'string' ? versionPattern.exec(latestVersion) : null
+  if (!current || !latest) return false
+
+  for (let i = 1; i < current.length; i++) {
+    const currentPart = BigInt(current[i])
+    const latestPart = BigInt(latest[i])
+    if (latestPart !== currentPart) return latestPart > currentPart
+  }
+  return false
+}
+
+async function openGitHub(url: string): Promise<void> {
+  try {
+    await shell.openExternal(url)
+  } catch {
+    throw new Error(`无法打开系统浏览器，请手动访问 ${url}`)
+  }
+}
 
 protocol.registerSchemesAsPrivileged([{
   scheme: 'relay',
@@ -85,6 +119,7 @@ interface Action {
   url?: string
   refresh?: boolean
   platform?: Platform
+  settingsOpen?: boolean
 }
 
 async function createWindow(): Promise<void> {
@@ -115,6 +150,7 @@ async function createWindow(): Promise<void> {
   ], false, isWeiboSsoCallback)
   const weibo = new Weibo((url, init) => weiboSession.fetch(url, init))
   let activeView: WebContentsView | undefined
+  let settingsOpen = false
   let activeLabel = ''
   let sourceTask: string | undefined
   let busy = false
@@ -135,7 +171,10 @@ async function createWindow(): Promise<void> {
     if (activeView !== view) {
       if (activeView) window.contentView.removeChildView(activeView)
       activeView = view
-      if (view) window.contentView.addChildView(view)
+      if (view) {
+        view.setVisible(!settingsOpen)
+        window.contentView.addChildView(view)
+      }
       resizeBrowser()
     }
     activeLabel = label
@@ -501,12 +540,12 @@ async function createWindow(): Promise<void> {
 
   const handlers = {
     'relay:version': () => app.getVersion(),
-    'relay:open-releases': async () => {
-      try {
-        await shell.openExternal(releasesUrl)
-      } catch {
-        throw new Error(`无法打开系统浏览器，请手动访问 ${releasesUrl}`)
-      }
+    'relay:has-update': () => hasUpdate(app.getVersion()),
+    'relay:open-releases': () => openGitHub(releasesUrl),
+    'relay:open-repository': () => openGitHub(repositoryUrl),
+    'relay:settings-open': (action?: Action) => {
+      settingsOpen = action?.settingsOpen === true
+      activeView?.setVisible(!settingsOpen)
     },
     'relay:restart': () => {
       if (busy) throw new Error('请等当前操作完成。')

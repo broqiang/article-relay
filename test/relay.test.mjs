@@ -38,7 +38,10 @@ test('initializes the bridge without CommonJS exports in a sandboxed preload', a
     return electron
   } })
   assert.equal(await bridge.getVersion(), 'relay:version')
+  assert.equal(await bridge.hasUpdate(), 'relay:has-update')
   assert.equal(await bridge.openReleases(), 'relay:open-releases')
+  assert.equal(await bridge.openRepository(), 'relay:open-repository')
+  assert.equal(JSON.stringify(await bridge.setSettingsOpen(false)), '{"channel":"relay:settings-open","args":{"settingsOpen":false}}')
   assert.equal(await bridge.restart(), 'relay:restart')
   assert.equal(await bridge.openZhihu(), 'relay:open-zhihu')
   assert.equal(await bridge.openWeibo(), 'relay:open-weibo')

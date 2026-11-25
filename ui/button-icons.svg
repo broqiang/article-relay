@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg">
+  <symbol id="tag" viewBox="0 0 24 24">
+    <path d="M3 3h8l10 10-8 8L3 11V3Z"/><path d="M7.5 7.5h.01"/>
+  </symbol>
+  <symbol id="restart" viewBox="0 0 24 24">
+    <path d="M3 11a9 9 0 1 1 2.6 7.4M3 5v6h6"/>
+  </symbol>
+  <symbol id="account" viewBox="0 0 24 24">
+    <circle cx="12" cy="8" r="4"/><path d="M4 21v-2a4 4 0 0 1 4-4h8a4 4 0 0 1 4 4v2"/>
+  </symbol>
+  <symbol id="continue" viewBox="0 0 24 24">
+    <path d="m9 5 7 7-7 7"/>
+  </symbol>
+  <symbol id="back" viewBox="0 0 24 24">
+    <path d="m11 5-7 7 7 7M4 12h16"/>
+  </symbol>
+  <symbol id="import" viewBox="0 0 24 24">
+    <path d="M12 3v12m-4-4 4 4 4-4M4 16v4h16v-4"/>
+  </symbol>
+  <symbol id="publish" viewBox="0 0 24 24">
+    <path d="m22 2-7 20-4-9-9-4 20-7ZM22 2 11 13"/>
+  </symbol>
+  <symbol id="trash" viewBox="0 0 24 24">
+    <path d="M3 6h18M9 6V3h6v3m4 0-1 14H6L5 6m5 4v6m4-6v6"/>
+  </symbol>
+  <symbol id="login" viewBox="0 0 24 24">
+    <path d="M12 4h7a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1h-7M3 12h12m-5-5 5 5-5 5"/>
+  </symbol>
+  <symbol id="search" viewBox="0 0 24 24">
+    <circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/>
+  </symbol>
+  <symbol id="document" viewBox="0 0 24 24">
+    <path d="M6 3h8l4 4v14H6V3Zm8 0v5h4M9 12h6m-6 4h6"/>
+  </symbol>
+  <symbol id="check" viewBox="0 0 24 24">
+    <path d="m5 12 4 4L19 6"/>
+  </symbol>
+  <symbol id="link" viewBox="0 0 24 24">
+    <path d="M10 13a4 4 0 0 0 6 0l4-4a4 4 0 0 0-6-6l-2 2m2 6a4 4 0 0 0-6 0l-4 4a4 4 0 0 0 6 6l2-2"/>
+  </symbol>
+</svg>

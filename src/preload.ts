@@ -3,7 +3,10 @@ const { contextBridge, ipcRenderer } = require('electron') as typeof import('ele
 
 contextBridge.exposeInMainWorld('relay', {
   getVersion: () => ipcRenderer.invoke('relay:version'),
+  hasUpdate: () => ipcRenderer.invoke('relay:has-update'),
   openReleases: () => ipcRenderer.invoke('relay:open-releases'),
+  openRepository: () => ipcRenderer.invoke('relay:open-repository'),
+  setSettingsOpen: (settingsOpen: boolean) => ipcRenderer.invoke('relay:settings-open', { settingsOpen }),
   restart: () => ipcRenderer.invoke('relay:restart'),
   openZhihu: () => ipcRenderer.invoke('relay:open-zhihu'),
   openWeibo: () => ipcRenderer.invoke('relay:open-weibo'),

@@ -13,14 +13,30 @@
     <img class="brand-mark" src="icon.svg" alt="" width="38" height="38">
     <h1>文章同步</h1>
     <div class="app-actions">
-      <span id="app-version" class="muted">版本读取中…</span>
-      <button id="open-releases" type="button" class="quiet">下载新版本</button>
-      <button id="restart" type="button" class="secondary">重启应用</button>
+      <button id="open-releases" type="button" class="release-link" title="查看 GitHub 发布页" hidden>
+        <svg class="button-icon" aria-hidden="true"><use href="button-icons.svg#tag"></use></svg>
+        <span id="app-version"></span>
+        <span id="update-badge" class="update-badge" hidden>有新版本</span>
+      </button>
+      <button id="open-repository" type="button" class="quiet icon-button" aria-label="GitHub 代码仓库" title="GitHub 代码仓库" disabled>
+        <img src="github.svg" width="20" height="20" alt="">
+      </button>
+      <button id="open-settings" type="button" class="quiet icon-button" popovertarget="settings-popover" aria-label="设置" title="设置" disabled>
+        <svg width="20" height="20" viewBox="0 2 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M10 3h4l.5 2.6.8.5 2.5-.9 2.8 2.8-.9 2.5.5.8 2.6.7v4l-2.6.5-.5.8.9 2.5-2.8 2.8-2.5-.9-.8.5L14 25h-4l-.5-2.6-.8-.5-2.5.9-2.8-2.8.9-2.5-.5-.8L1 16v-4l2.6-.5.5-.8-.9-2.5L6 5.4l2.5.9.8-.5L10 3Z"></path>
+          <circle cx="12" cy="14" r="3"></circle>
+        </svg>
+      </button>
+      <div id="settings-popover" class="settings-popover" popover="auto" role="group" aria-label="设置">
+        <button id="restart" type="button" class="quiet"><svg class="button-icon" aria-hidden="true"><use href="button-icons.svg#restart"></use></svg>重启应用</button>
+        <p id="settings-status" class="status error" role="status"></p>
+      </div>
     </div>
   </header>
   <main class="workspace">
     <aside class="sidebar">
       <button id="open-accounts" type="button" class="account-entry">
+        <svg class="button-icon" aria-hidden="true"><use href="button-icons.svg#account"></use></svg>
         <strong>发布账号</strong><span class="account-arrow" aria-hidden="true">›</span>
         <small id="account-summary">正在检查登录状态…</small>
       </button>
@@ -35,8 +51,8 @@
         <h2 id="workspace-heading">同步工作区</h2>
         <p id="browser-status" class="status" role="status" hidden></p>
         <div class="stage-actions">
-          <button id="continue" type="button" class="primary" hidden>继续读取文章</button>
-          <button id="back" type="button" class="quiet" hidden>返回</button>
+          <button id="continue" type="button" class="primary" hidden><svg class="button-icon" aria-hidden="true"><use href="button-icons.svg#continue"></use></svg>继续读取文章</button>
+          <button id="back" type="button" class="quiet" hidden><svg class="button-icon" aria-hidden="true"><use href="button-icons.svg#back"></use></svg><span id="back-label">返回</span></button>
         </div>
       </div>
       <div class="stage-content" id="article-workspace">
@@ -44,7 +60,7 @@
           <h3 id="source-heading">公众号原文</h3>
           <form id="source-form">
             <input id="source-url" aria-label="公众号文章链接" type="url" placeholder="粘贴微信公众号文章链接" required>
-            <button type="submit" class="secondary">导入文章</button>
+            <button type="submit" class="secondary"><svg class="button-icon" aria-hidden="true"><use href="button-icons.svg#import"></use></svg>导入文章</button>
           </form>
           <div id="summary" class="summary" hidden>
             <div class="article-heading">
@@ -56,10 +72,10 @@
             <p id="import-progress"></p>
             <progress id="download-progress" aria-label="图片下载进度" hidden></progress>
             <div class="result-actions">
-              <button id="publish-all" type="button" class="primary">一键发布</button>
-              <button id="retry-import" type="button" class="secondary" hidden>继续导入</button>
-              <button id="refresh-import" type="button" class="quiet" hidden>重新导入原文</button>
-              <button id="delete-task" type="button" class="quiet danger">删除任务</button>
+              <button id="publish-all" type="button" class="primary"><svg class="button-icon" aria-hidden="true"><use href="button-icons.svg#publish"></use></svg>一键发布</button>
+              <button id="retry-import" type="button" class="secondary" hidden><svg class="button-icon" aria-hidden="true"><use href="button-icons.svg#continue"></use></svg>继续导入</button>
+              <button id="refresh-import" type="button" class="quiet" hidden><svg class="button-icon" aria-hidden="true"><use href="button-icons.svg#restart"></use></svg>重新导入原文</button>
+              <button id="delete-task" type="button" class="quiet danger"><svg class="button-icon" aria-hidden="true"><use href="button-icons.svg#trash"></use></svg>删除任务</button>
             </div>
           </div>
           <p id="status" class="status" role="status"></p>
