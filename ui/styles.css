@@ -35,6 +35,7 @@ h1, h2, h3, p { margin: 0; }
 h1 { font-size: 19px; }
 .top-route { margin-left: auto; color: var(--muted); font-size: 13px; }
 .top-route span { margin: 0 4px; }
+.app-actions { display: flex; align-items: center; gap: 8px; font-size: 13px; }
 
 .workspace { height: calc(100vh - 72px); display: grid; grid-template-columns: 316px minmax(0, 1fr); }
 .sidebar { padding: 28px; border-right: 1px solid var(--line); background: #fff; overflow: auto; }

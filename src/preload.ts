@@ -2,6 +2,9 @@
 const { contextBridge, ipcRenderer } = require('electron') as typeof import('electron')
 
 contextBridge.exposeInMainWorld('relay', {
+  getVersion: () => ipcRenderer.invoke('relay:version'),
+  openReleases: () => ipcRenderer.invoke('relay:open-releases'),
+  restart: () => ipcRenderer.invoke('relay:restart'),
   openZhihu: () => ipcRenderer.invoke('relay:open-zhihu'),
   checkAccount: () => ipcRenderer.invoke('relay:account'),
   listTasks: () => ipcRenderer.invoke('relay:tasks'),

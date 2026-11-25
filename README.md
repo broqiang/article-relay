@@ -37,9 +37,9 @@ npm start
 
 ### Windows x64 安装包
 
-推送 `v*` 标签会启动 [Windows 打包工作流](.github/workflows/windows.yml)。也可以通过 **Actions → 构建 Windows 安装包 → Run workflow** 手动启动。构建成功后，在 **Artifacts** 下载 `文章同步-x64`，解压后运行 `文章同步-x64.exe`。
+推送 `v*` 标签会启动 [Windows 打包工作流](.github/workflows/windows.yml)。也可以通过 **Actions → 构建 Windows 安装包 → Run workflow** 手动启动。构建成功后，在 **Artifacts** 下载 `ArticleRelay-Windows-x64`，解压后运行 `ArticleRelay-<版本号>-Windows-x64.exe`。
 
-要发布安装包，在 GitHub 的 **Releases → Draft a new release** 选择对应标签，上传从 **Artifacts** 解压出的 `文章同步-x64.exe`，填写发布说明后发布。
+要发布安装包，在 GitHub 的 **Releases → Draft a new release** 选择对应标签，上传从 **Artifacts** 解压出的 `ArticleRelay-<版本号>-Windows-x64.exe`，填写发布说明后发布。
 
 最终使用者直接安装应用即可。Electron 运行时与 Chromium 随安装包提供，无需另装 Node.js 或 Chrome。
 

@@ -11,6 +11,7 @@ import { checkZhihuArticle, publishZhihuDraft, type PublishResult } from './zhih
 
 const workspaceUrl = 'relay://workspace/index.html'
 const zhihuLoginUrl = 'https://www.zhihu.com/signin'
+const releasesUrl = 'https://github.com/broqiang/article-relay/releases'
 const workspaceAssets = new Map([
   ['/index.html', 'text/html'],
   ['/styles.css', 'text/css'],
@@ -269,6 +270,19 @@ async function createWindow(): Promise<void> {
   }
 
   const handlers = {
+    'relay:version': () => app.getVersion(),
+    'relay:open-releases': async () => {
+      try {
+        await shell.openExternal(releasesUrl)
+      } catch {
+        throw new Error(`无法打开系统浏览器，请手动访问 ${releasesUrl}`)
+      }
+    },
+    'relay:restart': () => {
+      if (busy) throw new Error('请等当前操作完成。')
+      app.relaunch()
+      app.quit()
+    },
     'relay:open-zhihu': async () => {
       show(zhihuView, '知乎账号')
       const contents = zhihuView.webContents

@@ -28,6 +28,9 @@ test('initializes the bridge without CommonJS exports in a sandboxed preload', a
     assert.equal(name, 'electron')
     return electron
   } })
+  assert.equal(await bridge.getVersion(), 'relay:version')
+  assert.equal(await bridge.openReleases(), 'relay:open-releases')
+  assert.equal(await bridge.restart(), 'relay:restart')
   assert.equal(await bridge.openZhihu(), 'relay:open-zhihu')
   assert.equal(await bridge.checkAccount(), 'relay:account')
   assert.equal(JSON.stringify(await bridge.deleteTask('task')), '{"channel":"relay:delete-task","args":{"taskId":"task"}}')

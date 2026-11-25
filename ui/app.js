@@ -2,6 +2,7 @@ const byId = (id) => document.getElementById(id)
 const relay = window.relay
 const status = byId('status')
 const accountName = byId('account-name')
+const appVersion = byId('app-version')
 const importLabels = {
   pending: '待导入', reading: '读取中', paused: '待继续', downloading: '下载图片中', ready: '已保存到本地', failed: '导入失败',
 }
@@ -224,6 +225,8 @@ byId('check').addEventListener('click', () => void runAction(async () => {
   message(name ? '知乎账号已连接。' : '当前应用会话尚未登录知乎。')
 }))
 byId('back').addEventListener('click', () => void runAction(() => relay.hideBrowser()))
+byId('open-releases').addEventListener('click', () => void runAction(() => relay.openReleases()))
+byId('restart').addEventListener('click', () => void runAction(() => relay.restart()))
 
 if (relay) {
   relay.onProgress((taskId, label) => {
@@ -238,9 +241,13 @@ if (relay) {
   })
   relay.onTasksChanged(updateTasks)
   void runAction(async () => updateTasks(await relay.listTasks()))
+  void relay.getVersion().then((version) => {
+    appVersion.textContent = `版本 ${version}`
+  }).catch(() => { appVersion.textContent = '版本未读取' })
   accountName.textContent = '正在检查登录状态…'
   void checkAccount().catch(() => {})
 } else {
+  appVersion.textContent = '版本未读取'
   accountName.textContent = '应用连接未初始化'
   message('应用连接未能启动，请关闭并重新打开应用。', true)
   document.querySelectorAll('button, input').forEach((control) => { control.disabled = true })

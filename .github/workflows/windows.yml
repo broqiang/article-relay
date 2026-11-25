@@ -22,6 +22,6 @@ jobs:
       - run: npm run build:win
       - uses: actions/upload-artifact@v6
         with:
-          name: 文章同步-x64
-          path: release/文章同步-x64.exe
+          name: ArticleRelay-Windows-x64
+          path: release/ArticleRelay-*-Windows-x64.exe
           if-no-files-found: error
