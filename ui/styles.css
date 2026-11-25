@@ -173,7 +173,7 @@ form button { flex: none; min-height: 40px; }
 .platform-row:first-child, .account-row:first-child { margin-top: 4px; }
 .platform-row:last-child, .account-row:last-child { padding-bottom: 0; }
 .platform-row + .platform-row, .account-row + .account-row { border-top: 1px solid var(--line); }
-.platform-row { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 12px; }
+.platform-row { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: 12px; }
 .platform-row > .platform-icon { width: 48px; height: 48px; }
 .platform-row-heading, .account-row { display: flex; align-items: center; gap: 12px; }
 .platform-identity { flex: 1; min-width: 0; display: grid; gap: 3px; overflow-wrap: anywhere; font-size: 14px; }
