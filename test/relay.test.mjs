@@ -9,12 +9,15 @@ import { runInNewContext } from 'node:vm'
 import { wechatArticleUrl } from '../dist/wechat.js'
 import { draftUrl, Zhihu } from '../dist/zhihu.js'
 import { checkZhihuArticle, publishZhihuDraft } from '../dist/zhihu-publish.js'
+import { Weibo, findWeiboPublishedUrl, isWeiboSsoCallback, weiboArticleUrl, weiboDraftUrl, weiboEditor, weiboHistoryUrl } from '../dist/weibo.js'
+import { checkWeiboArticle, publishWeiboDraft } from '../dist/weibo-publish.js'
 import { chromiumUserAgent } from '../dist/browser.js'
 import { TaskStore, taskSummary } from '../dist/tasks.js'
 
 test('initializes the bridge without CommonJS exports in a sandboxed preload', async () => {
   const preload = readFileSync(new URL('../dist/preload.js', import.meta.url), 'utf8')
   let bridge
+  let weiboAccountChanged
   const electron = {
     contextBridge: {
       exposeInMainWorld(name, api) {
@@ -22,7 +25,13 @@ test('initializes the bridge without CommonJS exports in a sandboxed preload', a
         bridge = api
       },
     },
-    ipcRenderer: { invoke: async (channel, args) => args ? { channel, args } : channel },
+    ipcRenderer: {
+      invoke: async (channel, args) => args ? { channel, args } : channel,
+      on(channel, listener) {
+        assert.equal(channel, 'relay:weibo-account-changed')
+        weiboAccountChanged = listener
+      },
+    },
   }
   runInNewContext(preload, { require: (name) => {
     assert.equal(name, 'electron')
@@ -32,11 +41,231 @@ test('initializes the bridge without CommonJS exports in a sandboxed preload', a
   assert.equal(await bridge.openReleases(), 'relay:open-releases')
   assert.equal(await bridge.restart(), 'relay:restart')
   assert.equal(await bridge.openZhihu(), 'relay:open-zhihu')
+  assert.equal(await bridge.openWeibo(), 'relay:open-weibo')
   assert.equal(await bridge.checkAccount(), 'relay:account')
   assert.equal(JSON.stringify(await bridge.deleteTask('task')), '{"channel":"relay:delete-task","args":{"taskId":"task"}}')
   assert.equal(JSON.stringify(await bridge.publishArticle('task')), '{"channel":"relay:publish","args":{"taskId":"task"}}')
+  assert.equal(JSON.stringify(await bridge.publishArticle('task', 'weibo')), '{"channel":"relay:publish","args":{"taskId":"task","platform":"weibo"}}')
   assert.equal(JSON.stringify(await bridge.showDraft('task', 'run')), '{"channel":"relay:show-draft","args":{"taskId":"task","runId":"run"}}')
   assert.equal(JSON.stringify(await bridge.markPublished('task', 'run')), '{"channel":"relay:mark-published","args":{"taskId":"task","runId":"run"}}')
+  const accounts = []
+  bridge.onWeiboAccountChanged((name) => accounts.push(name))
+  weiboAccountChanged({ sender: 'internal event' }, '微博账号')
+  weiboAccountChanged({ sender: 'internal event' }, null)
+  assert.deepEqual(accounts, ['微博账号', null])
+})
+
+test('allows only the observed HTTPS Weibo SSO callback paths', () => {
+  for (const host of ['passport.weibo.cn', 'passport.sina.cn', 'passport.krcom.cn']) {
+    assert.equal(isWeiboSsoCallback(new URL(`https://${host}/sso/crossdomain?action=logout`)), true)
+  }
+  for (const url of [
+    'http://passport.weibo.cn/sso/crossdomain',
+    'https://passport.weibo.cn/sso/other',
+    'https://passport.weibo.cn.example.com/sso/crossdomain',
+    'https://user@passport.weibo.cn/sso/crossdomain',
+  ]) {
+    assert.equal(isWeiboSsoCallback(new URL(url)), false)
+  }
+})
+
+test('uploads local Weibo images once and records a replacement draft before saving', async () => {
+  const source = 'https://mmbiz.qpic.cn/image'
+  const uploads = []
+  const drafts = []
+  const saved = []
+  const progress = []
+  const adapter = new Weibo(async (address, init) => {
+    assert.equal(init.credentials, 'include')
+    const url = new URL(address)
+    if (address === weiboEditor) {
+      return new Response(String.raw`<script>var props = { config: JSON.parse('{"uid":"90","nick":"O\'Neil"}') };</script>`)
+    }
+    if (url.hostname === 'picupload.weibo.com') {
+      uploads.push(await init.body.text())
+      return Response.json({ data: { pics: { pic_1: { pid: 'aBc123' } } } })
+    }
+    assert.equal(url.searchParams.get('uid'), '90')
+    assert.equal(init.headers['SN-REQID'], url.searchParams.get('_rid'))
+    if (url.pathname.endsWith('/create')) return new Response('{"code":100000,"data":{"id":9876543210123456789}}')
+    assert.ok(url.pathname.endsWith('/save'))
+    const id = url.searchParams.get('id')
+    if (id === '15') return new Response(null, { status: 404 })
+    assert.deepEqual(drafts, [undefined, id])
+    assert.equal(init.body.get('id'), id)
+    saved.push(init.body)
+    return Response.json({ code: '100000' })
+  })
+  assert.deepEqual(await adapter.account(), { id: '90', name: "O'Neil" })
+  const article = { title: '图文', images: [source, source], html: '<p>图文</p><img data-relay-image="0"><img data-relay-image="1">' }
+  const content = await adapter.prepareContent('90', article, async (url) => {
+    assert.equal(url, source)
+    return new Blob(['local original'], { type: 'image/jpeg' })
+  }, (...args) => progress.push(args))
+  assert.deepEqual(uploads, ['local original'])
+  assert.deepEqual(progress, [[1, 1]])
+  assert.equal(await adapter.saveDraft('90', article.title, content, '15', async (id) => drafts.push(id)), '9876543210123456789')
+  assert.equal(saved[0].get('cover'), 'https://wx3.sinaimg.cn/large/aBc123.jpg')
+  assert.equal(saved[0].get('content').match(/data-pid="aBc123"/g).length, 2)
+  assert.equal(saved[0].get('status'), '0')
+
+  const loggedOut = new Weibo(async () => new Response('<meta http-equiv="refresh" content="0; url=https://weibo.com/">'))
+  assert.equal(await loggedOut.account(), null)
+})
+
+test('uses the exact Weibo draft ID and published status from the account history', async () => {
+  const adapter = new Weibo(async (address, init) => {
+    const url = new URL(address)
+    assert.equal(url.origin, 'https://card.weibo.com')
+    assert.equal(url.pathname, '/article/v5/aj/editor/draft/historylist')
+    assert.equal(url.searchParams.get('uid'), '90')
+    assert.equal(url.searchParams.get('allow_pay'), '1')
+    assert.equal(init.credentials, 'include')
+    assert.equal(init.method, undefined)
+    assert.equal(init.headers['SN-REQID'], url.searchParams.get('_rid'))
+    return Response.json({ code: 100000, data: { list: [
+      { id: '4172993', title: '同名文章', updated: '2026-11-25 13:08:17', status: 1, error_code: 0 },
+      { id: '4172994', title: '同名文章', status: 0, error_code: 0 },
+      { id: '4172995', status: 1, error_code: 1 },
+      { id: '4172996', status: 2, error_code: 0 },
+    ] } })
+  })
+  assert.deepEqual(await adapter.publishedDrafts('90'), new Map([
+    ['4172993', { title: '同名文章', updatedAt: Date.parse('2026-11-25T13:08:17+08:00') }],
+  ]))
+  assert.equal(weiboHistoryUrl('4172993'), `${weiboEditor}#/history/4172993`)
+})
+
+test('resolves published Weibo links without confusing same-title posts from different times or accounts', async () => {
+  const title = '同名文章'
+  const first = '2309405369125521719456'
+  const second = '2309405369127853752547'
+  const articleUrl = (id) => `https://weibo.com/ttarticle/p/show?id=${id}`
+  const post = (id, time, owner = '90') => ({
+    user: { idstr: owner },
+    created_at: `Wed Nov 25 ${time} +0800 2026`,
+    page_info: { object_type: 'article', page_id: id },
+    url_struct: [{ url_title: title, page_id: id, long_url: articleUrl(id) }],
+  })
+  const adapter = new Weibo(async (address, init) => {
+    const url = new URL(address)
+    assert.equal(url.pathname, '/ajax/statuses/mymblog')
+    assert.equal(url.searchParams.get('uid'), '90')
+    assert.equal(init.credentials, 'include')
+    if (url.searchParams.get('page') === '2') return new Response(null, { status: 503 })
+    return Response.json({ ok: 1, data: { since_id: 'more', list: [
+      post(first, '12:59:00'), post(second, '13:08:16'),
+      post('2309405369127853752548', '13:08:16', '91'),
+      { ...post('2309405369127853752549', '13:08:16'), retweeted_status: {} },
+    ] } })
+  })
+  const drafts = new Map([
+    ['15', { title, updatedAt: Date.parse('2026-11-25T12:59:01+08:00') }],
+    ['16', { title, updatedAt: Date.parse('2026-11-25T13:08:17+08:00') }],
+  ])
+  const articles = await adapter.publishedArticles('90')
+  assert.equal(articles.length, 2)
+  assert.equal(findWeiboPublishedUrl('15', drafts, articles), articleUrl(first))
+  assert.equal(findWeiboPublishedUrl('16', drafts, articles), articleUrl(second))
+  drafts.set('17', { ...drafts.get('16') })
+  assert.equal(findWeiboPublishedUrl('16', drafts, articles), undefined)
+})
+
+test('submits a Weibo draft only within its publish settings and confirms the public article separately', async (t) => {
+  const draftId = '123'
+  const articleUrl = 'https://weibo.com/ttarticle/p/show?id=2309404803154729631808'
+  const title = '图文标题'
+  const owner = '90'
+
+  function editor({ articleAuthor = owner, settings = true, navigate = true, interrupted = false, history = false } = {}) {
+    let url
+    let settingsOpen = false
+    let historyOpen = false
+    const clicks = []
+    const visible = { getClientRects: () => [1], closest: () => null, matches: () => false }
+    const body = {}
+    const button = (label, click) => ({
+      ...visible, textContent: label, click: () => { clicks.push(label); click() },
+    })
+    const next = button('下一步', () => { settingsOpen = settings })
+    const checkbox = {
+      ...visible, checked: true, matches: (selector) => selector === 'input[type="checkbox"]',
+      click() { this.checked = !this.checked },
+    }
+    const publish = button('发布', () => {
+      assert.equal(checkbox.checked, false)
+      if (navigate) url = articleUrl
+      if (history) {
+        settingsOpen = false
+        historyOpen = true
+        url = weiboHistoryUrl(draftId)
+      }
+    })
+    const composer = { ...visible, value: `发布了头条文章：《${title}》` }
+    const panel = {
+      ...visible, parentElement: body, textContent: '关注@头条文章 第一时间获取官方通知',
+      contains: (node) => [composer, publish].includes(node),
+      querySelectorAll: () => [{ ...visible, textContent: '关注@头条文章', control: checkbox }],
+    }
+    publish.parentElement = panel
+    const unrelated = button('发布', () => assert.fail('clicked an unrelated publish action'))
+    const author = { pathname: `/u/${articleAuthor}` }
+    return {
+      clicks,
+      loadURL: async (address) => { url = address },
+      stop: () => {},
+      executeJavaScriptInIsolatedWorld: async (_world, scripts) => {
+        const result = runInNewContext(scripts[0].code, {
+          URL,
+          location: new URL(url),
+          getComputedStyle: () => ({ visibility: 'visible' }),
+          document: {
+            body,
+            querySelector: (selector) => selector === '[node-type="articleTitle"]'
+              ? url === articleUrl ? { textContent: title, parentElement: { querySelector: () => author } } : null
+              : historyOpen ? null : { ...visible, value: title },
+            querySelectorAll: (selector) => {
+              if (selector.startsWith('button,')) return historyOpen ? [] : settingsOpen ? [next, publish, unrelated] : [next, unrelated]
+              if (selector.startsWith('textarea,')) return settingsOpen ? [composer] : []
+              return []
+            },
+          },
+        })
+        if (interrupted && result.clicked && clicks.at(-1) === '发布') throw new Error('Navigation interrupted the script')
+        return result
+      },
+    }
+  }
+
+  assert.equal(weiboDraftUrl(draftId), `${weiboEditor}#/draft/${draftId}`)
+  assert.equal(weiboArticleUrl('https://card.weibo.com/article/m/show/id/2309404803154729631808?_wb_client_=1'), articleUrl)
+  assert.equal(weiboArticleUrl('https://weibo.example/ttarticle/p/show?id=2309404803154729631808'), undefined)
+
+  await t.test('confirms navigation to a public article after the final click', async () => {
+    const page = editor({ interrupted: true })
+    const result = await publishWeiboDraft(page, draftId, title, owner, 600)
+    assert.equal(result.state, 'published')
+    assert.equal(result.url, articleUrl)
+    assert.deepEqual(page.clicks, ['下一步', '发布'])
+  })
+  await t.test('leaves unrecognized settings to the user and never repeats the final click', async () => {
+    const manual = editor({ settings: false })
+    const result = await publishWeiboDraft(manual, draftId, title, owner, 300)
+    assert.deepEqual(result, { state: 'manual', step: 'submit' })
+    assert.deepEqual(manual.clicks, ['下一步'])
+    const uncertain = editor({ navigate: false })
+    assert.equal((await publishWeiboDraft(uncertain, draftId, title, owner, 300)).state, 'uncertain')
+    assert.deepEqual(uncertain.clicks, ['下一步', '发布'])
+  })
+  await t.test('rejects public article links belonging to another author', async () => {
+    assert.equal(await checkWeiboArticle(editor({ articleAuthor: '91' }), articleUrl, title, owner, 60), false)
+    assert.equal(await checkWeiboArticle(editor(), articleUrl, title, owner, 600), true)
+  })
+  await t.test('hands an editor history preview off to the account history check', async () => {
+    const page = editor({ navigate: false, history: true })
+    assert.deepEqual(await publishWeiboDraft(page, draftId, title, owner, 600), { state: 'uncertain' })
+    assert.deepEqual(page.clicks, ['下一步', '发布'])
+  })
 })
 
 test('submits only recognized Zhihu publication controls and requires a matching article page', async (t) => {

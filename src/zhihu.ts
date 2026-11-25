@@ -1,5 +1,6 @@
 import { createHash, createHmac } from 'node:crypto'
 import { setTimeout as delay } from 'node:timers/promises'
+import { replaceArticleImages } from './article-images.js'
 import type { Article } from './wechat.js'
 
 export interface ZhihuAccount {
@@ -161,21 +162,9 @@ export class Zhihu {
     readImage: (url: string) => Promise<Blob>,
     onProgress: (current: number, total: number) => void,
   ): Promise<string> {
-    const imageMarker = /<img data-relay-image="(\d+)">/g
-    const markers = [...article.html.matchAll(imageMarker)]
-    if (markers.length !== article.images.length || markers.some((match, index) => match[1] !== String(index))) {
-      throw new Error('公众号正文与图片列表不一致，请重新导入。')
-    }
-    const uploaded = new Map<string, string>()
-    const images = [...new Set(article.images)]
-    for (const [index, url] of images.entries()) {
-      const step = `上传图片 ${index + 1}/${images.length}`
-      onProgress(index + 1, images.length)
-      uploaded.set(url, await this.uploadImageFile(await readImage(url), step))
-    }
-    return article.html.replace(imageMarker, (_match, index: string) => {
-      const url = uploaded.get(article.images[Number(index)])
-      if (!url) throw new Error('公众号正文与图片列表不一致，请重新导入。')
+    return replaceArticleImages(article, async (source, index, total) => {
+      onProgress(index, total)
+      const url = await this.uploadImageFile(await readImage(source), `上传图片 ${index}/${total}`)
       const escaped = url.replace(/[&"<>]/g, (char) => ({ '&': '&amp;', '"': '&quot;', '<': '&lt;', '>': '&gt;' })[char] ?? char)
       return `<figure><img src="${escaped}"></figure>`
     })

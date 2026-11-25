@@ -9,15 +9,21 @@ import { wechatArticleUrl, type Article } from './wechat.js'
 
 export type ImportState = 'pending' | 'reading' | 'paused' | 'downloading' | 'ready' | 'failed'
 
+export const platformNames = { zhihu: '知乎', weibo: '微博' } as const
+export type Platform = keyof typeof platformNames
+
 export interface SyncRun {
   id: string
-  platform: 'zhihu'
+  platform: Platform
   owner: string
   account: string
   startedAt: string
   finishedAt?: string
   state: 'running' | 'saved' | 'failed' | 'publishing' | 'published' | 'publish-uncertain'
   draftId?: string
+  articleTitle?: string
+  publishedUrl?: string
+  manualHandoff?: boolean
   draftMissing?: boolean
   error?: string
 }
@@ -147,7 +153,7 @@ export class TaskStore {
           if (run.state === 'publishing') {
             run.state = 'publish-uncertain'
             run.finishedAt = new Date().toISOString()
-            run.error = '应用退出时尚未确认发布结果，请先在知乎核对。'
+            run.error = `应用退出时尚未确认发布结果，请先在${platformNames[run.platform]}核对。`
             interrupted = true
             continue
           }

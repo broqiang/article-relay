@@ -44,6 +44,7 @@ h2, label { display: block; font-size: 14px; font-weight: 650; }
 .account { padding-bottom: 24px; border-bottom: 1px solid var(--line); }
 .platform { display: flex; align-items: center; gap: 12px; margin-top: 15px; }
 .platform-icon { width: 40px; height: 40px; background: #eaf1ff; color: #2455c4; font-size: 19px; }
+.weibo-icon { background: #fff1e5; color: #a7410b; }
 .platform strong { font-size: 14px; }
 .platform p { max-width: 198px; margin-top: 3px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
 .account-actions, .result-actions { display: flex; gap: 8px; }
@@ -123,3 +124,6 @@ form button { width: 100%; min-height: 40px; }
 .run-state.running, .run-state.publishing { color: var(--accent); }
 .run-state.failed, .run-state.publish-uncertain, .run-error { color: #9d2635; }
 .history-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 9px; }
+.article-check { display: flex; align-items: center; gap: 8px; margin-top: 9px; }
+.article-check input { min-width: 0; margin: 0; }
+.article-check button { flex: none; width: auto; }

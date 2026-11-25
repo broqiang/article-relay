@@ -12,7 +12,7 @@
   <header class="topbar">
     <img class="brand-mark" src="icon.svg" alt="" width="38" height="38">
     <h1>文章同步</h1>
-    <span class="top-route">微信公众号 <span aria-hidden="true">→</span> 知乎</span>
+    <span class="top-route">微信公众号 <span aria-hidden="true">→</span> 知乎、微博</span>
     <div class="app-actions">
       <span id="app-version" class="muted">版本读取中…</span>
       <button id="open-releases" type="button" class="quiet">下载新版本</button>
@@ -29,7 +29,15 @@
         </div>
         <div class="account-actions">
           <button id="login" type="button" class="secondary">打开知乎</button>
-          <button id="check" type="button" class="quiet">检查登录</button>
+          <button id="check" type="button" class="quiet" aria-label="检查知乎登录">检查登录</button>
+        </div>
+        <div class="platform">
+          <span class="platform-icon weibo-icon" aria-hidden="true">微</span>
+          <div><strong>微博</strong><p id="weibo-account-name">正在启动应用界面…</p></div>
+        </div>
+        <div class="account-actions">
+          <button id="weibo-login" type="button" class="secondary">打开微博</button>
+          <button id="weibo-check" type="button" class="quiet" aria-label="检查微博登录">检查登录</button>
         </div>
       </section>
       <form id="source-form">
@@ -54,7 +62,7 @@
         <div id="empty" class="empty">
           <div class="file-icon" aria-hidden="true"><span></span><span></span><span></span></div>
           <h3>还没有文章任务</h3>
-          <p>粘贴公众号链接，导入后可将本地素材同步到知乎。</p>
+          <p>粘贴公众号链接，导入后可将本地素材同步到知乎或微博。</p>
         </div>
         <div class="summary" id="summary" hidden>
           <div class="result">
@@ -63,6 +71,7 @@
             <p class="source-link" id="task-source"></p>
             <div class="result-actions">
               <button id="publish" type="button" class="primary">一键发布到知乎</button>
+              <button id="weibo-publish" type="button" class="primary">一键发布到微博</button>
               <button id="retry-import" type="button" class="secondary" hidden>继续导入</button>
               <button id="refresh-import" type="button" class="quiet" hidden>重新导入原文</button>
               <button id="delete-task" type="button" class="quiet danger">删除任务</button>

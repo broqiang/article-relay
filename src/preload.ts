@@ -6,7 +6,9 @@ contextBridge.exposeInMainWorld('relay', {
   openReleases: () => ipcRenderer.invoke('relay:open-releases'),
   restart: () => ipcRenderer.invoke('relay:restart'),
   openZhihu: () => ipcRenderer.invoke('relay:open-zhihu'),
-  checkAccount: () => ipcRenderer.invoke('relay:account'),
+  openWeibo: () => ipcRenderer.invoke('relay:open-weibo'),
+  checkAccount: (platform?: 'zhihu' | 'weibo') => platform
+    ? ipcRenderer.invoke('relay:account', { platform }) : ipcRenderer.invoke('relay:account'),
   listTasks: () => ipcRenderer.invoke('relay:tasks'),
   deleteTask: (taskId: string) => ipcRenderer.invoke('relay:delete-task', { taskId }),
   importArticle: (url: string) => ipcRenderer.invoke('relay:import', { url }),
@@ -14,9 +16,11 @@ contextBridge.exposeInMainWorld('relay', {
   readArticle: (taskId: string) => ipcRenderer.invoke('relay:read', { taskId }),
   showDraft: (taskId: string, runId: string) => ipcRenderer.invoke('relay:show-draft', { taskId, runId }),
   hideBrowser: () => ipcRenderer.invoke('relay:hide-browser'),
-  publishArticle: (taskId: string) => ipcRenderer.invoke('relay:publish', { taskId }),
+  publishArticle: (taskId: string, platform?: 'zhihu' | 'weibo') =>
+    ipcRenderer.invoke('relay:publish', platform ? { taskId, platform } : { taskId }),
   showArticle: (taskId: string, runId: string) => ipcRenderer.invoke('relay:show-article', { taskId, runId }),
-  markPublished: (taskId: string, runId: string) => ipcRenderer.invoke('relay:mark-published', { taskId, runId }),
+  markPublished: (taskId: string, runId: string, url?: string) =>
+    ipcRenderer.invoke('relay:mark-published', url ? { taskId, runId, url } : { taskId, runId }),
   onProgress: (callback: (taskId: string, label: string) => void) => {
     ipcRenderer.on('relay:progress', (_event, taskId, label) => callback(taskId, label))
   },
@@ -25,5 +29,8 @@ contextBridge.exposeInMainWorld('relay', {
   },
   onBrowser: (callback: (label: string) => void) => {
     ipcRenderer.on('relay:browser', (_event, label: string) => callback(label))
+  },
+  onWeiboAccountChanged: (callback: (name: string | null) => void) => {
+    ipcRenderer.on('relay:weibo-account-changed', (_event, name: string | null) => callback(name))
   },
 })
