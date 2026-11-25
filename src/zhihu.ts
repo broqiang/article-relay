@@ -13,9 +13,25 @@ const column = 'https://zhuanlan.zhihu.com'
 const imageApi = 'https://api.zhihu.com/images'
 const keyPattern = /^[\w-]+(?:\.[\w-]+)?$/
 
-export function draftUrl(id: string): string {
+function uploadedImageUrl(value: unknown): string | undefined {
+  if (typeof value !== 'string') return
+  try {
+    const url = new URL(value.startsWith('//') ? `https:${value}` : value)
+    if (url.protocol === 'https:' && url.hostname.endsWith('.zhimg.com') && !url.username && !url.password && !url.port) {
+      return url.href
+    }
+  } catch {
+    return
+  }
+}
+
+export function articleUrl(id: string): string {
   if (!/^\d+$/.test(id)) throw new Error('知乎返回了无效的草稿编号。')
-  return `${column}/p/${id}/edit`
+  return `${column}/p/${id}`
+}
+
+export function draftUrl(id: string): string {
+  return `${articleUrl(id)}/edit`
 }
 
 export class Zhihu {
@@ -76,23 +92,43 @@ export class Zhihu {
       throw new Error(`${step}失败，本地图片文件无效。`)
     }
     const bytes = await file.arrayBuffer()
+    const hash = createHash('md5').update(new Uint8Array(bytes)).digest('hex')
     const response = await this.fetch(imageApi, `${step}：请求图片上传凭证`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ image_hash: createHash('md5').update(new Uint8Array(bytes)).digest('hex'), source: 'article' }),
+      body: JSON.stringify({ image_hash: hash, source: 'article' }),
     })
     const data = await this.json(response, `${step}：请求图片上传凭证`)
     const upload = data.upload_file as { state?: number; image_id?: string; object_key?: string } | undefined
     if (upload?.state === 1 && typeof upload.image_id === 'string' && keyPattern.test(upload.image_id)) {
+      let processed = false
       for (let attempt = 0; attempt < 10; attempt++) {
         const check = await this.fetch(`${imageApi}/${upload.image_id}`, `${step}：确认知乎图片`)
         const image = await this.json(check, `${step}：确认知乎图片`)
-        if (typeof image.original_hash === 'string' && keyPattern.test(image.original_hash)) {
-          return `https://pic4.zhimg.com/${image.original_hash}`
+        if (image.status === 'success' || image.status === undefined) {
+          const url = uploadedImageUrl(image.original_src) ?? uploadedImageUrl(image.src)
+          if (url) return url
+          if (typeof image.original_hash === 'string' && keyPattern.test(image.original_hash)) {
+            return `https://pic4.zhimg.com/${image.original_hash}`
+          }
+          if (image.status === 'success') {
+            processed = true
+            break
+          }
         }
         if (attempt < 9) await delay(1000)
       }
-      throw new Error(`${step}失败，等待知乎处理图片超时。`)
+      // A reused image can already be available on the CDN while the status API is still pending.
+      const key = typeof upload.object_key === 'string' && keyPattern.test(upload.object_key) ? upload.object_key : `v2-${hash}`
+      const suffix = file.type === 'image/gif' && !key.endsWith('.gif') ? '.gif' : ''
+      const url = `https://picx.zhimg.com/${key}${suffix}`
+      const cached = await this.request(url, {
+        method: 'HEAD', credentials: 'omit', redirect: 'error', signal: AbortSignal.timeout(5_000),
+      }).catch(() => undefined)
+      if (cached?.status === 200 && /^image\//i.test(cached.headers.get('content-type') ?? '')) return url
+      throw new Error(processed
+        ? `${step}失败，知乎未返回可用的图片链接。`
+        : `${step}失败，等待知乎处理图片超时。已保留本地图片，可重试同步。`)
     }
 
     const key = upload?.object_key

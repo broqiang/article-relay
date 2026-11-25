@@ -5,7 +5,10 @@ const accountName = byId('account-name')
 const importLabels = {
   pending: '待导入', reading: '读取中', paused: '待继续', downloading: '下载图片中', ready: '已保存到本地', failed: '导入失败',
 }
-const runLabels = { running: '同步中', saved: '草稿已保存', failed: '同步失败' }
+const runLabels = {
+  running: '同步中', saved: '草稿已保存', failed: '同步失败',
+  publishing: '发布中', published: '已发布', 'publish-uncertain': '发布结果待核对',
+}
 const dateFormat = new Intl.DateTimeFormat('zh-CN', { dateStyle: 'short', timeStyle: 'short' })
 let tasks = []
 let selectedId
@@ -50,7 +53,7 @@ function taskLabel(task) {
 
 function renderControls(task) {
   document.querySelectorAll('button, input').forEach((control) => { control.disabled = busy })
-  byId('sync').disabled = busy || task?.importState !== 'ready'
+  byId('publish').disabled = busy || task?.importState !== 'ready'
   byId('retry-import').hidden = !task || !['pending', 'failed', 'paused'].includes(task.importState)
   byId('refresh-import').hidden = !task?.hasArticle || task.importState !== 'ready'
   byId('continue').hidden = task?.importState !== 'paused' || browserLabel !== '公众号原文'
@@ -60,6 +63,8 @@ function renderRuns(task) {
   byId('no-runs').hidden = task.runs.length > 0
   const list = byId('run-list')
   list.replaceChildren()
+  const closedDrafts = new Set(task.runs.filter((run) =>
+    ['publishing', 'published', 'publish-uncertain'].includes(run.state)).map((run) => run.draftId))
   for (const run of task.runs) {
     const row = document.createElement('li')
     const heading = document.createElement('div')
@@ -67,19 +72,29 @@ function renderRuns(task) {
     heading.append(element('strong', `知乎 · ${run.account}`), element('span', runLabels[run.state], `run-state ${run.state}`))
     row.append(heading, element('p', dateFormat.format(new Date(run.startedAt)), 'muted'))
     if (run.error) row.append(element('p', run.error, 'run-error'))
-    if (run.state === 'running' && activeProgress) row.append(element('p', activeProgress, 'muted'))
+    if (['running', 'publishing'].includes(run.state) && activeProgress) row.append(element('p', activeProgress, 'muted'))
     if (run.draftMissing) row.append(element('p', '该草稿链接已失效。', 'muted'))
-    if (run.state === 'saved' && run.draftId && !run.draftMissing) {
-      row.append(element('p', `https://zhuanlan.zhihu.com/p/${run.draftId}/edit`, 'muted source-link'))
+    if (run.state === 'saved' && run.error && run.draftId && !run.draftMissing && !closedDrafts.has(run.draftId)) {
+      const actions = document.createElement('div')
+      actions.className = 'history-actions'
+      actions.append(button('打开草稿', 'secondary', () => void runAction(() => relay.showDraft(task.id, run.id))))
+      row.append(actions)
+    }
+    if (run.draftId && ['published', 'publish-uncertain'].includes(run.state)) {
+      row.append(element('p', `https://zhuanlan.zhihu.com/p/${run.draftId}`, 'muted source-link'))
       const actions = document.createElement('div')
       actions.className = 'history-actions'
       actions.append(
-        button('打开草稿', 'secondary', () => void runAction(() => relay.showDraft(task.id, run.id))),
-        button('复制链接', 'quiet', () => void runAction(async () => {
-          await relay.copyDraft(task.id, run.id)
-          message('已复制草稿链接。')
-        })),
+        button(run.state === 'published' ? '查看文章' : '核对发布结果', 'secondary', () =>
+          void runAction(async () => { await showPublishResult(await relay.showArticle(task.id, run.id)) })),
       )
+      if (run.state === 'publish-uncertain') {
+        actions.append(button('标记已发布', 'quiet', () => void runAction(async () => {
+          if (window.confirm('请确认你已在知乎看到这篇文章公开发布。现在将同步记录标记为已发布？')) {
+            await showPublishResult(await relay.markPublished(task.id, run.id))
+          }
+        })))
+      }
       row.append(actions)
     }
     list.append(row)
@@ -124,7 +139,7 @@ function render() {
 
 function updateTasks(items, selection) {
   tasks = items
-  selectedId = selection || selectedId || tasks[0]?.id
+  selectedId = selection || selectedTask()?.id || tasks[0]?.id
   render()
 }
 
@@ -161,6 +176,21 @@ async function importTask(request) {
   if (task) message(task.importDetail, task.importState === 'failed')
 }
 
+async function showPublishResult(result) {
+  if (result.loginRequired) {
+    await relay.openZhihu()
+    message('请在右侧登录知乎后重试。')
+  } else if (result.publishedUrl) {
+    message('知乎文章已发布。')
+  } else if (result.articleOpened) {
+    message(result.needsConfirmation
+      ? '已在系统浏览器打开链接。看到文章后，可回来点「标记已发布」。'
+      : '已在系统浏览器打开知乎文章。')
+  } else if (result.publishNotice) {
+    message(result.publishNotice, true)
+  }
+}
+
 byId('source-form').addEventListener('submit', (event) => {
   event.preventDefault()
   void runAction(() => importTask(() => relay.importArticle(byId('source-url').value.trim())))
@@ -170,25 +200,16 @@ byId('retry-import').addEventListener('click', () => void runAction(() => import
   return selectedTask().importState === 'paused' ? relay.readArticle(selectedId) : relay.importTask(selectedId)
 })))
 byId('refresh-import').addEventListener('click', () => void runAction(() => importTask(() => relay.importTask(selectedId, true))))
+byId('delete-task').addEventListener('click', () => void runAction(async () => {
+  const task = selectedTask()
+  if (!task || !window.confirm(`删除「${task.title || '公众号文章'}」的本地任务、同步记录和已下载的图片？知乎上的草稿和文章将继续保留。`)) return
+  const { mediaRemoved } = await relay.deleteTask(task.id)
+  activeProgress = ''
+  message(mediaRemoved ? '已删除任务。' : '任务已删除，部分本地图片未能清理。', !mediaRemoved)
+}))
 
-byId('sync').addEventListener('click', () => void runAction(async () => {
-  const taskId = selectedId
-  let result = await relay.syncDraft(taskId)
-  if (result.confirmDraftId) {
-    if (!window.confirm('这篇文章已有知乎草稿。继续同步可能覆盖草稿里的手动编辑，是否继续？')) {
-      message('已取消同步。')
-      return
-    }
-    result = await relay.syncDraft(taskId, result.confirmDraftId)
-  }
-  if (result.loginRequired) {
-    await relay.openZhihu()
-    message('请在右侧登录知乎后重试。')
-  } else if (result.draftId) {
-    message('知乎草稿已保存。')
-  } else {
-    message('草稿状态已变化，请重新发起同步。')
-  }
+byId('publish').addEventListener('click', () => void runAction(async () => {
+  await showPublishResult(await relay.publishArticle(selectedId))
 }))
 
 byId('login').addEventListener('click', () => void runAction(async () => {

@@ -107,6 +107,7 @@ form button { width: 100%; min-height: 40px; }
 .result h3 { margin-top: 12px; font-size: 24px; line-height: 1.4; }
 .source-link { user-select: all; overflow-wrap: anywhere; }
 .result-actions { margin-top: 20px; flex-wrap: wrap; }
+.result-actions .danger { color: #9d2635; }
 
 .task-detail { margin-top: 22px; padding-top: 18px; border-top: 1px solid var(--line); }
 .task-detail h3 { font-size: 15px; }
@@ -117,7 +118,7 @@ form button { width: 100%; min-height: 40px; }
 .run-list li + li { border-top: 1px solid var(--line); }
 .run-heading { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; font-size: 13px; }
 .run-state { white-space: nowrap; font-size: 12px; }
-.run-state.saved { color: #1e694a; }
-.run-state.running { color: var(--accent); }
-.run-state.failed, .run-error { color: #9d2635; }
+.run-state.saved, .run-state.published { color: #1e694a; }
+.run-state.running, .run-state.publishing { color: var(--accent); }
+.run-state.failed, .run-state.publish-uncertain, .run-error { color: #9d2635; }
 .history-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 9px; }

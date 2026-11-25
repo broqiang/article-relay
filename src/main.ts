@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, ipcMain, protocol, session, type Session, WebContentsView } from 'electron'
+import { app, BrowserWindow, ipcMain, protocol, session, shell, type Session, WebContentsView } from 'electron'
 import { randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -6,7 +6,8 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { chromiumUserAgent } from './browser.js'
 import { errorMessage, TaskStore, type SyncRun, type Task } from './tasks.js'
 import { inspectWeChatScript, wechatArticleUrl, type PageResult } from './wechat.js'
-import { draftUrl, Zhihu } from './zhihu.js'
+import { articleUrl, draftUrl, Zhihu } from './zhihu.js'
+import { checkZhihuArticle, publishZhihuDraft, type PublishResult } from './zhihu-publish.js'
 
 const workspaceUrl = 'relay://workspace/index.html'
 const zhihuLoginUrl = 'https://www.zhihu.com/signin'
@@ -36,13 +37,14 @@ function serveWorkspace(): void {
   })
 }
 
-function siteView(browserSession: Session, origins: string[]): WebContentsView {
+function siteView(browserSession: Session, origins: string[], backgroundThrottling = true): WebContentsView {
   browserSession.setUserAgent(chromiumUserAgent(browserSession.getUserAgent()))
   const view = new WebContentsView({ webPreferences: {
     session: browserSession,
     sandbox: true,
     contextIsolation: true,
     nodeIntegration: false,
+    backgroundThrottling,
   } })
   const contents = view.webContents
   function allowed(url: string): boolean {
@@ -72,7 +74,6 @@ interface Action {
   runId?: string
   url?: string
   refresh?: boolean
-  replaceDraftId?: string
 }
 
 async function createWindow(): Promise<void> {
@@ -94,16 +95,16 @@ async function createWindow(): Promise<void> {
   const wechatSession = session.fromPartition('persist:wechat')
   const sourceView = siteView(wechatSession, ['https://mp.weixin.qq.com'])
   const zhihuSession = session.fromPartition('persist:zhihu')
-  const zhihuView = siteView(zhihuSession, ['https://www.zhihu.com', 'https://zhuanlan.zhihu.com'])
+  const zhihuView = siteView(zhihuSession, ['https://www.zhihu.com', 'https://zhuanlan.zhihu.com'], false)
   const zhihu = new Zhihu((url, init) => zhihuSession.fetch(url, init))
   let activeView: WebContentsView | undefined
   let sourceTask: string | undefined
   let busy = false
 
-  function resizeBrowser(): void {
+  function resizeBrowser(view = activeView): void {
     const [width, height] = window.getContentSize()
     // Keep the workspace controls and the browser toolbar visible above/beside the view.
-    activeView?.setBounds({ x: 340, y: 132, width: Math.max(1, width - 364), height: Math.max(1, height - 156) })
+    view?.setBounds({ x: 340, y: 132, width: Math.max(1, width - 364), height: Math.max(1, height - 156) })
   }
 
   function show(view?: WebContentsView, label = ''): void {
@@ -209,16 +210,56 @@ async function createWindow(): Promise<void> {
     }
   }
 
-  function savedRun(action?: Action): SyncRun & { draftId: string } {
-    const run = selectedTask(action).runs.find((item) => item.id === action?.runId)
-    if (!run || run.state !== 'saved' || run.draftMissing || !run.draftId) throw new Error('这次同步没有可用的草稿链接。')
-    return { ...run, draftId: run.draftId }
-  }
-
   async function writeRun(taskId: string, run: SyncRun, missingId?: string): Promise<void> {
     const other = tasks.get(taskId).runs.filter((item) => item.id !== run.id).map((item) =>
       missingId && item.owner === run.owner && item.draftId === missingId ? { ...item, draftMissing: true } : item)
     await updateTask(taskId, { runs: [run, ...other] })
+  }
+
+  function assertCanPublish(task: Task, owner: string): void {
+    const prior = task.runs.find((run) => run.owner === owner &&
+      ['publishing', 'published', 'publish-uncertain'].includes(run.state))
+    if (prior?.state === 'published') throw new Error('这篇文章已用当前知乎账号发布，可在同步记录中查看。')
+    if (prior) throw new Error('上一次发布的结果尚未确认，请先在知乎核对。')
+  }
+
+  function articleRun(task: Task, runId?: string): SyncRun & { draftId: string } {
+    const run = task.runs.find((item) => item.id === runId)
+    if (!run?.draftId || (run.state !== 'published' && run.state !== 'publish-uncertain')) {
+      throw new Error('这次同步没有可查看的文章链接。')
+    }
+    return { ...run, draftId: run.draftId }
+  }
+
+  async function recordPublished(taskId: string, run: SyncRun & { draftId: string }) {
+    await writeRun(taskId, { ...run, state: 'published', finishedAt: new Date().toISOString(), error: undefined })
+    return { publishedUrl: articleUrl(run.draftId) }
+  }
+
+  async function publishSaved(taskId: string, run: SyncRun & { draftId: string }) {
+    assertCanPublish(tasks.get(taskId), run.owner)
+    await writeRun(taskId, { ...run, state: 'publishing', finishedAt: undefined, error: undefined })
+    progress(taskId, '正在提交知乎文章…')
+    show()
+    resizeBrowser(zhihuView)
+    let result: PublishResult
+    try {
+      result = await publishZhihuDraft(zhihuView.webContents, run.draftId)
+      if (result === 'uncertain') {
+        progress(taskId, '正在核对知乎发布结果…')
+        if (await checkZhihuArticle(zhihuView.webContents, run.draftId)) result = 'published'
+      }
+    } catch {
+      result = 'uncertain'
+    }
+    if (result === 'published') return recordPublished(taskId, run)
+    const error = result === 'manual'
+      ? '未能自动提交。草稿已保留，你可以打开草稿，在知乎编辑器中检查并发布。'
+      : '知乎发布结果尚未确认。请在知乎核对文章状态，避免重复发布。'
+    await writeRun(taskId, {
+      ...run, state: result === 'manual' ? 'saved' : 'publish-uncertain', finishedAt: new Date().toISOString(), error,
+    })
+    return { publishNotice: error }
   }
 
   function serial<T>(work: () => Promise<T>): Promise<T> {
@@ -243,6 +284,14 @@ async function createWindow(): Promise<void> {
     },
     'relay:account': async () => ({ name: (await zhihu.account())?.name ?? null }),
     'relay:tasks': () => tasks.list(),
+    'relay:delete-task': (action?: Action) => serial(async () => {
+      const task = selectedTask(action)
+      const result = await tasks.delete(task.id)
+      if (sourceTask === task.id) sourceTask = undefined
+      show()
+      notifyTasks()
+      return result
+    }),
     'relay:import': (action?: Action) => serial(async () => {
       if (action?.taskId) return beginImport(selectedTask(action), action.refresh === true)
       if (typeof action?.url !== 'string') throw new Error('请输入微信公众号文章链接。')
@@ -262,9 +311,11 @@ async function createWindow(): Promise<void> {
       }
     }),
     'relay:hide-browser': () => show(),
-    'relay:copy-draft': (action?: Action) => clipboard.writeText(draftUrl(savedRun(action).draftId)),
     'relay:show-draft': (action?: Action) => serial(async () => {
-      const run = savedRun(action)
+      const run = selectedTask(action).runs.find((item) => item.id === action?.runId)
+      if (run?.state !== 'saved' || !run.error || run.draftMissing || !run.draftId) {
+        throw new Error('这次发布没有可打开的草稿。')
+      }
       const account = await zhihu.account()
       if (!account || run.owner !== account.id) {
         throw new Error('请先登录保存这份草稿的知乎账号。')
@@ -272,7 +323,26 @@ async function createWindow(): Promise<void> {
       show(zhihuView, '知乎草稿编辑器')
       await zhihuView.webContents.loadURL(draftUrl(run.draftId))
     }),
-    'relay:sync': (action?: Action) => serial(async () => {
+    'relay:show-article': (action?: Action) => serial(async () => {
+      const task = selectedTask(action)
+      const run = articleRun(task, action?.runId)
+      if (run.state === 'publish-uncertain') {
+        progress(task.id, '正在核对知乎发布结果…')
+        if (await checkZhihuArticle(zhihuView.webContents, run.draftId)) return recordPublished(task.id, run)
+      }
+      try {
+        await shell.openExternal(articleUrl(run.draftId))
+      } catch {
+        throw new Error('无法打开系统浏览器。你可以复制同步记录中的文章链接后访问。')
+      }
+      return { articleOpened: true, needsConfirmation: run.state === 'publish-uncertain' }
+    }),
+    'relay:mark-published': (action?: Action) => serial(async () => {
+      const task = selectedTask(action)
+      const run = articleRun(task, action?.runId)
+      return run.state === 'published' ? { publishedUrl: articleUrl(run.draftId) } : recordPublished(task.id, run)
+    }),
+    'relay:publish': (action?: Action) => serial(async () => {
       const task = selectedTask(action)
       const article = task.article
       if (!article || task.importState !== 'ready') throw new Error('请先完成公众号文章导入。')
@@ -290,32 +360,33 @@ async function createWindow(): Promise<void> {
         await writeRun(task.id, { ...base, finishedAt: new Date().toISOString(), state: 'failed', error: '请先在应用内登录知乎。' })
         return { loginRequired: true }
       }
-      const owned = task.runs.filter((run) => run.platform === 'zhihu' && run.owner === account.id && run.draftId && !run.draftMissing)
+      assertCanPublish(task, account.id)
+      const owned = task.runs.filter((run) => run.owner === account.id && run.draftId && !run.draftMissing)
       const existing = owned[0]?.draftId
-      if (existing && owned.some((run) => run.draftId === existing && run.state === 'saved') && action?.replaceDraftId !== existing) {
-        return { confirmDraftId: existing }
-      }
+      const saved = owned.find((run) => run.draftId === existing && run.state === 'saved')
+      if (existing && saved) return publishSaved(task.id, { ...saved, draftId: existing })
 
       let run: SyncRun = { ...base, owner: account.id, account: account.name, draftId: existing }
       await writeRun(task.id, run)
+      let draftId: string
       try {
         const content = await zhihu.prepareContent(article, (url) => tasks.readImage(task.id, url), (index, total) => {
           progress(task.id, `正在上传本地原图 ${index}/${total}…`)
         })
         progress(task.id, '正在保存知乎草稿…')
-        const draftId = await zhihu.saveDraft(article.title, content, existing, async (id) => {
+        draftId = await zhihu.saveDraft(article.title, content, existing, async (id) => {
           const missingId = !id ? run.draftId : undefined
           run = { ...run, draftId: id }
           await writeRun(task.id, run, missingId)
           if (missingId) progress(task.id, '原草稿已失效，正在新建知乎草稿…')
         })
-        await writeRun(task.id, { ...run, draftId, state: 'saved', finishedAt: new Date().toISOString() })
-        show()
-        return { draftId }
       } catch (error) {
         await writeRun(task.id, { ...run, state: 'failed', error: errorMessage(error), finishedAt: new Date().toISOString() })
         throw error
       }
+      const savedRun: SyncRun & { draftId: string } = { ...run, draftId, state: 'saved', finishedAt: new Date().toISOString() }
+      await writeRun(task.id, savedRun)
+      return publishSaved(task.id, savedRun)
     }),
   }
 
@@ -331,7 +402,7 @@ async function createWindow(): Promise<void> {
 
   window.webContents.on('will-navigate', (event) => event.preventDefault())
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
-  window.on('resize', resizeBrowser)
+  window.on('resize', () => resizeBrowser())
   window.on('closed', () => {
     for (const channel of Object.keys(handlers)) ipcMain.removeHandler(channel)
     for (const view of [sourceView, zhihuView]) view.webContents.close()

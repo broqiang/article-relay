@@ -16,7 +16,7 @@ export interface SyncRun {
   account: string
   startedAt: string
   finishedAt?: string
-  state: 'running' | 'saved' | 'failed'
+  state: 'running' | 'saved' | 'failed' | 'publishing' | 'published' | 'publish-uncertain'
   draftId?: string
   draftMissing?: boolean
   error?: string
@@ -144,6 +144,13 @@ export class TaskStore {
           interrupted = true
         }
         for (const run of task.runs) {
+          if (run.state === 'publishing') {
+            run.state = 'publish-uncertain'
+            run.finishedAt = new Date().toISOString()
+            run.error = '应用退出时尚未确认发布结果，请先在知乎核对。'
+            interrupted = true
+            continue
+          }
           if (run.state !== 'running') continue
           run.state = 'failed'
           run.finishedAt = new Date().toISOString()
@@ -178,6 +185,18 @@ export class TaskStore {
     const updated = { ...this.get(id), ...changes, updatedAt: new Date().toISOString() }
     await this.commit(this.tasks.map((task) => task.id === id ? updated : task))
     return updated
+  }
+
+  async delete(id: string): Promise<{ mediaRemoved: boolean }> {
+    if (!/^[a-f\d]{64}$/.test(id)) throw new Error('无效的任务编号。')
+    const task = this.get(id)
+    await this.commit(this.tasks.filter((candidate) => candidate !== task))
+    try {
+      await rm(join(this.root, 'media', id), { recursive: true, force: true })
+      return { mediaRemoved: true }
+    } catch {
+      return { mediaRemoved: false }
+    }
   }
 
   private async commit(tasks: Task[]): Promise<void> {

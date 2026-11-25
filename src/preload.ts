@@ -5,13 +5,15 @@ contextBridge.exposeInMainWorld('relay', {
   openZhihu: () => ipcRenderer.invoke('relay:open-zhihu'),
   checkAccount: () => ipcRenderer.invoke('relay:account'),
   listTasks: () => ipcRenderer.invoke('relay:tasks'),
+  deleteTask: (taskId: string) => ipcRenderer.invoke('relay:delete-task', { taskId }),
   importArticle: (url: string) => ipcRenderer.invoke('relay:import', { url }),
   importTask: (taskId: string, refresh = false) => ipcRenderer.invoke('relay:import', { taskId, refresh }),
   readArticle: (taskId: string) => ipcRenderer.invoke('relay:read', { taskId }),
   showDraft: (taskId: string, runId: string) => ipcRenderer.invoke('relay:show-draft', { taskId, runId }),
-  copyDraft: (taskId: string, runId: string) => ipcRenderer.invoke('relay:copy-draft', { taskId, runId }),
   hideBrowser: () => ipcRenderer.invoke('relay:hide-browser'),
-  syncDraft: (taskId: string, replaceDraftId?: string) => ipcRenderer.invoke('relay:sync', { taskId, replaceDraftId }),
+  publishArticle: (taskId: string) => ipcRenderer.invoke('relay:publish', { taskId }),
+  showArticle: (taskId: string, runId: string) => ipcRenderer.invoke('relay:show-article', { taskId, runId }),
+  markPublished: (taskId: string, runId: string) => ipcRenderer.invoke('relay:mark-published', { taskId, runId }),
   onProgress: (callback: (taskId: string, label: string) => void) => {
     ipcRenderer.on('relay:progress', (_event, taskId, label) => callback(taskId, label))
   },
