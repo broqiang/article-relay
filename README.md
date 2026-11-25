@@ -37,26 +37,11 @@ npm start
 
 ### Windows x64 安装包
 
-仓库提供 [GitHub Actions 打包工作流](.github/workflows/windows.yml)。有仓库写入权限的维护者可以在默认分支配置好工作流后，打开 **Actions → 构建 Windows 安装包 → Run workflow**。构建成功后下载 `ArticleRelay-Windows-x64`，解压后运行 `.exe` 安装程序。
+推送 `v*` 标签会启动 [Windows 打包工作流](.github/workflows/windows.yml)。也可以通过 **Actions → 构建 Windows 安装包 → Run workflow** 手动启动。构建成功后，在 **Artifacts** 下载 `文章同步-x64`，解压后运行 `文章同步-x64.exe`。
+
+要发布安装包，在 GitHub 的 **Releases → Draft a new release** 选择对应标签，上传从 **Artifacts** 解压出的 `文章同步-x64.exe`，填写发布说明后发布。
 
 最终使用者直接安装应用即可。Electron 运行时与 Chromium 随安装包提供，无需另装 Node.js 或 Chrome。
-
-### 通过 GitHub 构建和发布 macOS 安装包
-
-[macOS 工作流](.github/workflows/macos.yml) 分别构建 Apple 芯片（`arm64`）和 Intel（`x64`）的 `.dmg`。
-
-- **内测构建**使用 **Actions → 构建 macOS 安装包 → Run workflow**。完成后在 **Artifacts** 下载对应架构的安装包。内测包使用临时签名，适合开发验证。
-- **公开发布**使用与 `package.json` 版本一致的 Git 标签，例如 `v0.1.0`。推送标签后，工作流签名并公证两个架构的应用，再创建包含两个安装包的 GitHub Release 草稿。核对后，在 **Releases** 页面发布草稿。
-
-发布前，在仓库的 **Settings → Secrets and variables → Actions** 设置以下 Repository secrets。
-
-| Secret | 内容 |
-| --- | --- |
-| `MAC_CSC_LINK` | 包含私钥的 Developer ID Application `.p12` 证书，使用 Base64 编码 |
-| `MAC_CSC_KEY_PASSWORD` | `.p12` 导出密码。证书未设置密码时可留空。 |
-| `APPLE_API_KEY_CONTENT` | Apple 公证用 App Store Connect API 私钥文件 `.p8` 的完整文本 |
-| `APPLE_API_KEY_ID` | API Key ID |
-| `APPLE_API_ISSUER` | API Issuer ID |
 
 ## 当前支持范围
 
