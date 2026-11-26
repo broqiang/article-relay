@@ -17,7 +17,7 @@ contextBridge.exposeInMainWorld('relay', {
   getJuejinDefaults: () => ipcRenderer.invoke('relay:juejin-defaults'),
   searchJuejinTags: (owner: string, query: string) => ipcRenderer.invoke('relay:juejin-tags', { owner, query }),
   saveJuejinDefaults: (owner: string, defaults: JuejinDefaults) => ipcRenderer.invoke('relay:save-juejin-defaults', { owner, defaults }),
-  checkAccount: (platform?: RelayPlatform | 'jianshu') => platform
+  checkAccount: (platform?: RelayPlatform) => platform
     ? ipcRenderer.invoke('relay:account', { platform }) : ipcRenderer.invoke('relay:account'),
   listTasks: () => ipcRenderer.invoke('relay:tasks'),
   deleteTask: (taskId: string) => ipcRenderer.invoke('relay:delete-task', { taskId }),

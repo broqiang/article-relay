@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { chromiumUserAgent, publicationUrlStatus } from './browser.js'
-import { checkJianshuAccount, jianshuHome, jianshuLoginUrl } from './jianshu.js'
+import { Jianshu, jianshuArticleUrl, jianshuDraftUrl, jianshuHome, jianshuLoginUrl, sameJianshuRichText } from './jianshu.js'
 import { monitorJuejinAudits } from './juejin-audit.js'
 import { Juejin, juejinArticleId, juejinArticles, juejinArticleUrl, juejinDefaultsRequired, juejinDraftUrl, juejinHome, juejinId,
   juejinReviewUrl, parseJuejinDefaults, type JuejinDefaults, type JuejinPublicationStatus } from './juejin.js'
@@ -130,7 +130,7 @@ interface Action {
   runId?: string
   url?: string
   refresh?: boolean
-  platform?: Platform | 'jianshu'
+  platform?: Platform
   settingsOpen?: boolean
   openOnly?: boolean
   returnFromDraft?: boolean
@@ -164,6 +164,7 @@ async function createWindow(): Promise<void> {
   const jianshuView = siteView(jianshuSession, [
     new URL(jianshuHome).origin, 'https://open.weixin.qq.com', 'https://graph.qq.com',
   ])
+  const jianshu = new Jianshu((url, init) => jianshuSession.fetch(url, init))
   const weiboSession = session.fromPartition('persist:weibo')
   const weiboView = siteView(weiboSession, [
     'https://weibo.com', 'https://www.weibo.com', 'https://card.weibo.com',
@@ -179,8 +180,8 @@ async function createWindow(): Promise<void> {
         new URL(details.url).pathname === '/content_api/v1/article/publish') observeJuejinDispatch?.()
     callback({})
   })
-  const publicationSites = { zhihu, weibo, juejin }
-  const publicationSessions = { zhihu: zhihuSession, weibo: weiboSession, juejin: juejinSession }
+  const publicationSites = { zhihu, weibo, juejin, jianshu }
+  const publicationSessions = { zhihu: zhihuSession, weibo: weiboSession, juejin: juejinSession, jianshu: jianshuSession }
   let activeView: WebContentsView | undefined
   let activeDraft: { taskId: string; runId: string } | undefined
   let zhihuDraftCheckView: WebContentsView | undefined
@@ -381,7 +382,7 @@ async function createWindow(): Promise<void> {
 
   function publicationPlatform(action?: Action): Platform {
     if (action?.platform === undefined) return 'zhihu'
-    if (action.platform !== 'jianshu' && Object.hasOwn(platformNames, action.platform)) return action.platform
+    if (Object.hasOwn(platformNames, action.platform)) return action.platform
     throw new Error('不支持的发布平台。')
   }
 
@@ -391,6 +392,11 @@ async function createWindow(): Promise<void> {
       throw new Error('这次同步没有可查看的文章链接。')
     }
     return { ...run, draftId: run.draftId }
+  }
+
+  function jianshuDraft(run: SyncRun & { draftId: string }) {
+    if (!run.jianshuNotebookId) throw new Error('这次发布缺少简书文集编号。')
+    return { id: run.draftId, notebookId: run.jianshuNotebookId }
   }
 
   async function recordPublished(
@@ -480,7 +486,19 @@ async function createWindow(): Promise<void> {
     return stopped
   }
 
+  async function markJianshuDraftIncomplete(taskId: string, run: SyncRun): Promise<string> {
+    const notice = '简书草稿的正文未保存。点击「重试发布」可继续同步这份草稿。'
+    await writeRun(taskId, { ...run, state: 'failed', finishedAt: new Date().toISOString(), error: notice })
+    return notice
+  }
+
   async function refreshPublication(taskId: string, run: SyncRun & { draftId: string }, manual: boolean) {
+    if (run.platform === 'jianshu') {
+      const result = await jianshu.publication(run.owner, jianshuDraft(run))
+      if (result.url) return recordPublished(taskId, run, result.url)
+      if (result.needsContent) return { checkNotice: await markJianshuDraftIncomplete(taskId, run) }
+      return { checkNotice: '简书尚未确认发布，可以打开草稿编辑器查看。' }
+    }
     if (run.platform === 'juejin') {
       const current = manual ? await stopJuejinAutoCheck(taskId, run) : run
       const checked = await juejin.publicationStatus(run.draftId, run.owner, run.articleId)
@@ -529,6 +547,7 @@ async function createWindow(): Promise<void> {
     progress(task.id, `正在核对${name}线上文章…`)
     await requireOwner()
     let url: string | undefined
+    if (run.platform === 'jianshu') url = jianshuArticleUrl(run.publishedUrl ?? '')
     if (run.platform === 'weibo') url = weiboArticleUrl(run.publishedUrl ?? '') || (await checkWeiboHistory(run))?.url
     if (run.platform === 'zhihu') url = articleUrl(run.draftId)
     if (run.platform === 'juejin') {
@@ -545,7 +564,9 @@ async function createWindow(): Promise<void> {
         ? await checkWeiboArticle(weiboView.webContents, url, run.articleTitle ?? '', run.owner)
         : run.platform === 'juejin'
           ? await juejin.publicArticle(juejinArticleId(url)!, run.draftId).catch(() => false)
-          : await checkZhihuArticle(zhihuView.webContents, run.draftId)
+          : run.platform === 'jianshu'
+            ? (await jianshu.publication(run.owner, jianshuDraft(run)).catch(() => undefined))?.url === url
+            : await checkZhihuArticle(zhihuView.webContents, run.draftId)
       throw new Error(exists
         ? `${name}文章仍在线，请先到${name}删除文章。`
         : `暂时无法确认${name}文章已删除。请核对线上文章后重试。`)
@@ -626,6 +647,18 @@ async function createWindow(): Promise<void> {
     progress(taskId, `正在提交${name}文章…`)
     show()
     if (run.platform === 'juejin') return publishSavedJuejin(taskId, run, defaults)
+    if (run.platform === 'jianshu') {
+      const result = await jianshu.publish(run.owner, jianshuDraft(run)).catch(() => undefined)
+      if (result?.url) return recordPublished(taskId, run, result.url)
+      if (result?.needsContent) return { publishNotice: await markJianshuDraftIncomplete(taskId, run) }
+      const saved = result?.saved === true
+      const notice = saved ? '简书未接受发布。草稿已保留，可以打开草稿检查并发布。' :
+        '简书发布结果尚未确认，请刷新状态或打开草稿核对。'
+      await writeRun(taskId, {
+        ...run, state: saved ? 'saved' : 'publish-uncertain', finishedAt: new Date().toISOString(), error: notice,
+      })
+      return { saved, publishNotice: notice }
+    }
     let result: PublishResult
     let manualReason: string | undefined
     try {
@@ -700,12 +733,16 @@ async function createWindow(): Promise<void> {
     const configured = platform === 'juejin' ? await tasks.juejinDefaults(account.id) : undefined
     const tagLimit = 'tagLimit' in account && typeof account.tagLimit === 'number' ? account.tagLimit : undefined
     const defaults = configured ? await juejin.validateDefaults(configured, tagLimit) : undefined
-    const owned = task.runs.filter((run) => run.platform === platform && run.owner === account.id && run.draftId && !run.draftMissing)
+    const owned = task.runs.filter((run) => run.platform === platform && run.owner === account.id && run.draftId &&
+      !run.draftMissing && (platform !== 'jianshu' || run.jianshuNotebookId))
     const existing = owned[0]?.draftId
     const saved = owned.find((run) => run.draftId === existing && run.state === 'saved')
     if (existing && saved) return publishSaved(task.id, { ...saved, draftId: existing }, defaults)
 
-    let run: SyncRun = { ...base, owner: account.id, account: account.name, draftId: existing, articleTitle: article.title }
+    let run: SyncRun = {
+      ...base, owner: account.id, account: account.name, draftId: existing,
+      jianshuNotebookId: owned[0]?.jianshuNotebookId, articleTitle: article.title,
+    }
     await writeRun(task.id, run)
     let draftId: string
     try {
@@ -719,7 +756,23 @@ async function createWindow(): Promise<void> {
         await writeRun(task.id, run, missingId)
         if (missingId) progress(task.id, `原草稿已失效，正在新建${name}草稿…`)
       }
-      if (platform === 'weibo') {
+      if (platform === 'jianshu') {
+        progress(task.id, '正在同步简书草稿…')
+        const draft = await jianshu.saveDraft(account.id, article, existing ? jianshuDraft({ ...run, draftId: existing }) : undefined,
+          async ({ id, notebookId }) => {
+            run = { ...run, draftId: id, jianshuNotebookId: notebookId }
+            await writeRun(task.id, run)
+          }, readImage, uploading, {
+            toMarkdown: async (html, images) => {
+              const converted = await window.webContents.executeJavaScript(
+                `(${juejinMarkdown.toString()})(${JSON.stringify(html)}, ${JSON.stringify(images)})`)
+              return converted.markdown
+            },
+            sameRichText: (expected, stored) => window.webContents.executeJavaScript(
+              `(${sameJianshuRichText.toString()})(${JSON.stringify(expected)}, ${JSON.stringify(stored)})`),
+          })
+        draftId = draft.id
+      } else if (platform === 'weibo') {
         const content = await weibo.prepareContent(account.id, article, readImage, uploading)
         progress(task.id, '正在保存微博草稿…')
         draftId = await weibo.saveDraft(account.id, article.title, content, existing, saveProgress)
@@ -814,10 +867,6 @@ async function createWindow(): Promise<void> {
       }
     },
     'relay:account': async (action?: Action) => {
-      if (action?.platform === 'jianshu') {
-        const account = await checkJianshuAccount((url, init) => jianshuSession.fetch(url, init))
-        return { name: account?.name ?? null }
-      }
       const adapter = publicationSites[publicationPlatform(action)]
       return { name: (await adapter.account())?.name ?? null }
     },
@@ -883,6 +932,20 @@ async function createWindow(): Promise<void> {
       if (!account || run.owner !== account.id) {
         throw new Error(`请先登录保存这份草稿的${name}账号。`)
       }
+      if (run.platform === 'jianshu') {
+        const draft = jianshuDraft(run)
+        const result = await jianshu.publication(run.owner, draft).catch(() => undefined)
+        if (result?.url) return recordPublished(task.id, run, result.url)
+        await jianshuView.webContents.loadURL(jianshuDraftUrl(draft))
+        if (run.state === 'saved') {
+          await writeRun(task.id, {
+            ...run, state: 'publish-uncertain', manualHandoff: true,
+            error: '已打开简书草稿。提交后请返回工作区核对发布结果。',
+          })
+        }
+        show(jianshuView, '简书草稿编辑器', { taskId: task.id, runId: run.id })
+        return
+      }
       if (run.platform === 'weibo') {
         show()
         const url = weiboDraftUrl(run.draftId)
@@ -929,7 +992,8 @@ async function createWindow(): Promise<void> {
         await shell.openExternal(juejinArticleUrl(id))
         return { articleOpened: true }
       }
-      const url = run.platform === 'weibo' ? weiboArticleUrl(run.publishedUrl ?? '') : articleUrl(run.draftId)
+      const url = run.platform === 'weibo' ? weiboArticleUrl(run.publishedUrl ?? '') :
+        run.platform === 'jianshu' ? jianshuArticleUrl(run.publishedUrl ?? '') : articleUrl(run.draftId)
       if (!url) throw new Error('这次同步没有可查看的文章链接。')
       try {
         await shell.openExternal(url)
@@ -966,6 +1030,9 @@ async function createWindow(): Promise<void> {
     'relay:mark-published': (action?: Action) => serial(async () => {
       const task = selectedTask(action)
       const run = articleRun(task, action?.runId)
+      if (run.platform === 'jianshu') {
+        return run.state === 'published' ? { publishedUrl: run.publishedUrl } : refreshPublication(task.id, run, true)
+      }
       if (run.platform === 'juejin') {
         if (run.state === 'published') return { publishedUrl: run.publishedUrl }
         const id = juejinArticleId(action?.url ?? '', true)

@@ -10,7 +10,7 @@ import { wechatArticleUrl, type Article } from './wechat.js'
 
 export type ImportState = 'pending' | 'reading' | 'paused' | 'downloading' | 'ready' | 'failed'
 
-export const platformNames = { zhihu: '知乎', weibo: '微博', juejin: '掘金' } as const
+export const platformNames = { zhihu: '知乎', weibo: '微博', juejin: '掘金', jianshu: '简书' } as const
 export type Platform = keyof typeof platformNames
 
 export interface SyncRun {
@@ -22,6 +22,7 @@ export interface SyncRun {
   finishedAt?: string
   state: 'running' | 'saved' | 'failed' | 'publishing' | 'published' | 'publish-uncertain'
   draftId?: string
+  jianshuNotebookId?: string
   articleId?: string
   articleTitle?: string
   publishedUrl?: string
@@ -38,12 +39,13 @@ export function canCheckJuejinAudit(run: SyncRun): run is SyncRun & { draftId: s
 }
 
 export function canOpenDraft(run: SyncRun, runs: SyncRun[]): run is SyncRun & { draftId: string } {
-  if (!run.draftId || run.draftMissing) return false
+  if (!run.draftId || run.draftMissing || (run.platform === 'jianshu' && !run.jianshuNotebookId)) return false
   const related = runs.filter((item) => item.platform === run.platform && item.draftId === run.draftId)
   if (related.some((item) => item.state === 'published' || item.state === 'publishing' ||
       (item.platform === 'juejin' && (item.articleId || item.juejinAudit)))) return false
   if (run.state === 'saved') return !related.some((item) => item.state === 'publish-uncertain')
-  return run.state === 'publish-uncertain' && Boolean(run.manualHandoff || run.platform === 'zhihu' || run.platform === 'juejin')
+  return run.state === 'publish-uncertain' &&
+    Boolean(run.manualHandoff || run.platform === 'zhihu' || run.platform === 'juejin' || run.platform === 'jianshu')
 }
 
 export function blockingPublication(runs: SyncRun[], platform: Platform): SyncRun | undefined {

@@ -13,7 +13,7 @@ import { checkZhihuArticle, publishZhihuDraft } from '../dist/zhihu-publish.js'
 import { Weibo, findWeiboPublishedUrl, isWeiboSsoCallback, weiboArticleUrl, weiboDraftUrl, weiboEditor, weiboHistoryUrl } from '../dist/weibo.js'
 import { checkWeiboArticle, publishWeiboDraft } from '../dist/weibo-publish.js'
 import { chromiumUserAgent, publicationUrlStatus } from '../dist/browser.js'
-import { checkJianshuAccount, jianshuHome } from '../dist/jianshu.js'
+import { checkJianshuAccount, Jianshu, jianshuArticleUrl, jianshuDraftUrl, jianshuHome } from '../dist/jianshu.js'
 import { blockingPublication, canCheckJuejinAudit, canOpenDraft, clearPublishedRun, publishMissingPlatforms, TaskStore, taskSummary } from '../dist/tasks.js'
 import { Juejin, juejinArticleId, juejinDraftUrl, parseJuejinDefaults } from '../dist/juejin.js'
 import { uploadJuejinImage } from '../dist/juejin-images.js'
@@ -102,6 +102,133 @@ test('reads Jianshu account state without treating invalid pages as signed out',
   await assert.rejects(checkJianshuAccount(async () => new Response(null, { status: 403 })), /HTTP 403/)
 })
 
+test('reuses a Jianshu draft after save failure and uploads each WeChat image once per attempt', async () => {
+  const image = 'https://mmbiz.qpic.cn/example'
+  const article = {
+    title: '测试文章',
+    html: '<h2>标题</h2><img data-relay-image="0"><img data-relay-image="1">',
+    images: [image, image],
+  }
+  const note = { id: 23, notebook_id: 12, note_type: 2, autosave_control: 0, shared: false }
+  let created = 0
+  let uploads = 0
+  let updates = 0
+  let draft
+  let savedContent = ''
+  const site = new Jianshu(async (url, init) => {
+    const { pathname, searchParams } = new URL(url)
+    if (pathname === '/author/current_user') return Response.json({ id: 5 })
+    if (pathname === '/author/notebooks') return Response.json([{ id: 12 }, { id: 13 }])
+    if (pathname === '/upload_images/token.json') {
+      assert.equal(searchParams.get('filename'), 'image-1.png')
+      return Response.json({ key: 'upload_images/example.png', token: 'upload-token' })
+    }
+    if (url === 'https://upload.qiniup.com') {
+      uploads++
+      assert.equal(init.credentials, 'omit')
+      assert.equal(init.body.get('file').name, 'image-1.png')
+      assert.equal(await init.body.get('file').text(), 'local image')
+      assert.equal(init.body.get('token'), 'upload-token')
+      return Response.json({ url: '//upload-images.jianshu.io/upload_images/example.png' })
+    }
+    if (pathname === '/author/notes') {
+      created++
+      assert.equal(init.method, 'POST')
+      assert.deepEqual(JSON.parse(init.body), { notebook_id: 12, title: article.title, at_bottom: false })
+      return Response.json(note)
+    }
+    if (pathname === '/author/notebooks/12/notes') {
+      assert.equal(searchParams.get('nid'), '23')
+      return Response.json([note])
+    }
+    if (pathname === '/author/notes/23/content') return Response.json({ content: savedContent })
+    if (pathname === '/author/notes/23') {
+      updates++
+      assert.deepEqual(draft, { id: '23', notebookId: '12' })
+      assert.equal(init.method, 'PUT')
+      const { id, content, autosave_control } = JSON.parse(init.body)
+      assert.equal(id, '23')
+      assert.equal(autosave_control, note.autosave_control + 1)
+      assert.equal(content, note.note_type === 2 ? '## 标题\n图片' :
+        '<h2>标题</h2>' + '<div class="image-package"><img src="https://upload-images.jianshu.io/upload_images/example.png"><div class="image-caption"></div></div>'.repeat(2))
+      if (updates === 1) return Response.json({ error: '保存冲突' }, { status: 409 })
+      if (updates !== 2) savedContent = note.note_type === 1 ? `<section>${content}</section>` : content
+      return Response.json({ content_updated_at: 'now' })
+    }
+    assert.fail(url)
+  })
+  const save = () => site.saveDraft('5', article, draft, async (ref) => { draft = ref }, async (url) => {
+    assert.equal(url, image)
+    return new Blob(['local image'], { type: 'image/png' })
+  }, (index, total) => assert.deepEqual([index, total], [1, 1]), {
+    toMarkdown: async (html, urls) => {
+      assert.equal(note.note_type, 2)
+      assert.equal(html, article.html)
+      assert.deepEqual(urls, Array(2).fill('https://upload-images.jianshu.io/upload_images/example.png'))
+      return '## 标题\n图片'
+    },
+    sameRichText: async (expected, stored) => {
+      assert.equal(note.note_type, 1)
+      assert.notEqual(stored, expected)
+      return stored === `<section>${expected}</section>`
+    },
+  })
+  await assert.rejects(save(), /HTTP 409/)
+  note.autosave_control = 1
+  await assert.rejects(save(), /正文尚未保存成功/)
+  assert.deepEqual(await save(), draft)
+  note.note_type = 1
+  assert.deepEqual(await save(), draft)
+  assert.deepEqual([created, uploads, updates], [1, 4, 4])
+  assert.equal(jianshuDraftUrl(draft), 'https://www.jianshu.com/writer#/notebooks/12/notes/23')
+})
+
+test('checks the exact Jianshu draft after an ambiguous submission and skips a second submission', async () => {
+  const draft = { id: '23', notebookId: '12' }
+  const note = { id: 23, shared: false, slug: '012345abcdef' }
+  const url = 'https://www.jianshu.com/p/012345abcdef'
+  let submit = 0
+  let owner = 5
+  let reject = false
+  let content = '<p><br></p>'
+  const site = new Jianshu(async (url, init) => {
+    const { pathname } = new URL(url)
+    if (pathname === '/author/current_user') return Response.json({ id: owner })
+    if (pathname === '/author/notebooks/12/notes') return Response.json([{ id: 24, shared: true, slug: 'aaaaaaaaaaaa' }, note])
+    if (pathname === '/author/notes/23/content') return Response.json({ content })
+    if (pathname === '/author/notes/23/publicize') {
+      assert.equal(init.method, 'POST')
+      assert.deepEqual(JSON.parse(init.body), {})
+      submit++
+      if (reject) return Response.json({ error: '请完成实名认证' }, { status: 422 })
+      throw new Error('连接中断')
+    }
+    assert.fail(url)
+  })
+  owner = 6
+  assert.deepEqual(await site.publish('5', draft), { saved: true })
+  assert.equal(submit, 0)
+  owner = 5
+  assert.deepEqual(await site.publication('5', draft), { needsContent: true })
+  assert.deepEqual(await site.publish('5', draft), { needsContent: true })
+  assert.equal(submit, 0)
+  content = '<p>正文</p>'
+  reject = true
+  assert.deepEqual(await site.publish('5', draft), { saved: true })
+  reject = false
+  assert.deepEqual(await site.publish('5', draft), { saved: false })
+  assert.deepEqual(await site.publication('5', draft), { needsContent: false })
+  note.shared = true
+  assert.deepEqual(await site.publication('5', draft), { url })
+  assert.deepEqual(await site.publish('5', draft), { url })
+  assert.equal(submit, 2)
+  assert.equal(jianshuArticleUrl(url + '?v=1'), url)
+  assert.equal(jianshuArticleUrl('https://example.org/p/012345abcdef'), undefined)
+  const run = { platform: 'jianshu', draftId: draft.id, jianshuNotebookId: draft.notebookId, state: 'publish-uncertain' }
+  assert.equal(canOpenDraft(run, [run]), true)
+  assert.equal(blockingPublication([run], 'jianshu'), run)
+})
+
 test('publishes only eligible platforms, keeps going after failures, and includes a cleared platform on retry', async () => {
   const published = { id: 'wb', platform: 'weibo', owner: 'original', draftId: '9', state: 'published' }
   const relatedFailure = { ...published, id: 'wb-failed', state: 'failed' }
@@ -115,8 +242,8 @@ test('publishes only eligible platforms, keeps going after failures, and include
   const states = (outcomes) => outcomes.map(({ state }) => state)
 
   assert.equal(blockingPublication(task.runs, 'weibo'), published)
-  assert.deepEqual(states(await batch(() => ({ loginRequired: true }))), ['login-required', 'already-published', 'login-required'])
-  assert.deepEqual(attempts, ['zhihu', 'juejin'])
+  assert.deepEqual(states(await batch(() => ({ loginRequired: true }))), ['login-required', 'already-published', 'login-required', 'login-required'])
+  assert.deepEqual(attempts, ['zhihu', 'juejin', 'jianshu'])
 
   task.runs = clearPublishedRun(task.runs, published)
   assert.deepEqual(task.runs, [zhihuFailure])
@@ -126,14 +253,15 @@ test('publishes only eligible platforms, keeps going after failures, and include
     if (platform === 'juejin') return { saved: true, publishNotice: '请补齐分类和标签。' }
     return { published: true }
   })
-  assert.deepEqual(states(retried), ['failed', 'published', 'saved'])
+  assert.deepEqual(states(retried), ['failed', 'published', 'saved', 'published'])
   assert.equal(retried[0].detail, '连接失败')
-  assert.deepEqual(attempts, ['zhihu', 'weibo', 'juejin'])
+  assert.deepEqual(attempts, ['zhihu', 'weibo', 'juejin', 'jianshu'])
 
   task.runs = [{ ...zhihuFailure, state: 'publish-uncertain' }, published]
   attempts.length = 0
   task.runs.push({ platform: 'juejin', state: 'publish-uncertain' })
-  assert.deepEqual(states(await batch(() => assert.fail('unexpected publication'))), ['needs-check', 'already-published', 'needs-check'])
+  task.runs.push({ platform: 'jianshu', state: 'publish-uncertain' })
+  assert.deepEqual(states(await batch(() => assert.fail('unexpected publication'))), ['needs-check', 'already-published', 'needs-check', 'needs-check'])
   assert.deepEqual(attempts, [])
 })
 
