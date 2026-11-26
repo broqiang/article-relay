@@ -187,9 +187,9 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
 .panel + .panel { margin-top: 14px; }
 .panel h3 { font-size: 15px; }
 
-.import-panel { max-width: 600px; }
 #source-form label { display: block; font-size: 14px; font-weight: 600; }
-#source-form input { margin-bottom: 0; }
+.source-form-row { display: flex; gap: 8px; margin-top: 9px; }
+.source-form-row input { flex: 1; min-width: 0; margin: 0; }
 #no-article { font-size: 13px; line-height: 1.55; }
 form button { flex: none; min-height: 40px; }
 .article-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }

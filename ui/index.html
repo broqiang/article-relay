@@ -86,14 +86,14 @@
         </section>
       </div>
       <div class="stage-content" id="import-workspace" hidden>
-        <div class="panel import-panel">
+        <div class="panel">
           <form id="source-form">
             <label for="source-url">微信公众号文章链接</label>
-            <input id="source-url" type="url" placeholder="粘贴微信公众号文章链接" required>
-            <p id="import-status" class="status" role="status"></p>
-            <div class="result-actions">
-              <button type="submit" class="primary">导入文章</button>
+            <div class="source-form-row">
+              <input id="source-url" type="url" placeholder="粘贴微信公众号文章链接" required>
+              <button type="submit" class="primary"><svg class="button-icon" aria-hidden="true"><use href="button-icons.svg#import"></use></svg>导入文章</button>
             </div>
+            <p id="import-status" class="status" role="status"></p>
           </form>
         </div>
       </div>
