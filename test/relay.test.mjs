@@ -14,12 +14,45 @@ import { Weibo, findWeiboPublishedUrl, isWeiboSsoCallback, weiboArticleUrl, weib
 import { checkWeiboArticle, publishWeiboDraft } from '../dist/weibo-publish.js'
 import { chromiumUserAgent, publicationUrlStatus } from '../dist/browser.js'
 import { checkJianshuAccount, Jianshu, jianshuArticleUrl, jianshuDraftUrl, jianshuHome } from '../dist/jianshu.js'
+import { checkTiebaLogin } from '../dist/tieba.js'
 import { blockingPublication, canCheckJuejinAudit, canOpenDraft, clearPublishedRun, publishMissingPlatforms, TaskStore, taskSummary } from '../dist/tasks.js'
 import { Juejin, juejinArticleId, juejinDraftUrl, parseJuejinDefaults } from '../dist/juejin.js'
 import { uploadJuejinImage } from '../dist/juejin-images.js'
 import { publishJuejinDraft } from '../dist/juejin-publish.js'
 import { monitorJuejinPublishResponse } from '../dist/juejin-publish-response.js'
 import { monitorJuejinAudits } from '../dist/juejin-audit.js'
+
+test('checks Tieba login using the site session and requires an explicit login state', async () => {
+  const accountUrl = 'https://tieba.baidu.com/f/user/json_userinfo'
+  const tbsUrl = 'https://tieba.baidu.com/dc/common/tbs'
+  for (const account of [{ data: { user_portrait: 'test-portrait' } }, null]) {
+    const signedIn = await checkTiebaLogin(async (url, init) => {
+      assert.equal(url, accountUrl)
+      assert.equal(init.credentials, 'same-origin')
+      assert.equal(init.mode, 'same-origin')
+      assert.equal(new Headers(init.headers).get('Origin'), 'https://tieba.baidu.com')
+      assert.equal(init.cache, 'no-store')
+      assert.equal(init.redirect, 'follow')
+      return Response.json(account)
+    })
+    assert.equal(signedIn, account !== null)
+  }
+  for (const isLogin of [0, 1]) {
+    const signedIn = await checkTiebaLogin(async (url) => {
+      if (url === accountUrl) return Response.json({ data: {} })
+      assert.equal(url, tbsUrl)
+      return new Response(JSON.stringify({ is_login: isLogin }), { headers: { 'Content-Type': 'text/html' } })
+    })
+    assert.equal(signedIn, isLogin === 1)
+  }
+  await assert.rejects(checkTiebaLogin(async () => new Response('<title>百度安全验证</title>')), /未能确认/)
+  await assert.rejects(checkTiebaLogin(async () => new Response('{}')), /未能确认/)
+  await assert.rejects(checkTiebaLogin(async () => new Response(null, { status: 403 })), /未能确认.*HTTP 403/)
+  const networkError = new Error('Redirect was cancelled')
+  await assert.rejects(checkTiebaLogin(async () => { throw networkError }), {
+    message: /未能确认/, cause: networkError,
+  })
+})
 
 test('initializes the bridge without CommonJS exports in a sandboxed preload', async () => {
   const preload = readFileSync(new URL('../dist/preload.js', import.meta.url), 'utf8')
@@ -54,6 +87,8 @@ test('initializes the bridge without CommonJS exports in a sandboxed preload', a
   assert.equal(await bridge.openWeibo(), 'relay:open-weibo')
   assert.equal(await bridge.openJuejin(), 'relay:open-juejin')
   assert.equal(await bridge.openJianshu(), 'relay:open-jianshu')
+  assert.equal(await bridge.openTieba(), 'relay:open-tieba')
+  assert.equal(await bridge.checkTiebaAccount(), 'relay:tieba-account')
   assert.equal(await bridge.getJuejinDefaults(), 'relay:juejin-defaults')
   assert.equal(JSON.stringify(await bridge.searchJuejinTags('123', 'JavaScript')),
     '{"channel":"relay:juejin-tags","args":{"owner":"123","query":"JavaScript"}}')

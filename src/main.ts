@@ -12,6 +12,7 @@ import { juejinMarkdown } from './juejin-markdown.js'
 import { publishJuejinDraft } from './juejin-publish.js'
 import { monitorJuejinPublishResponse, type JuejinPublishDiagnostic } from './juejin-publish-response.js'
 import { blockingPublication, canCheckJuejinAudit, canOpenDraft, clearPublishedRun, errorMessage, platformNames, publishMissingPlatforms, TaskStore, type Platform, type SyncRun, type Task } from './tasks.js'
+import { checkTiebaLogin, tiebaHome } from './tieba.js'
 import { inspectWeChatScript, wechatArticleUrl, type PageResult } from './wechat.js'
 import { Weibo, findWeiboPublishedUrl, isWeiboSsoCallback, weiboArticleUrl, weiboDraftUrl, weiboEditor, weiboHistoryUrl, weiboHome, type WeiboAccount } from './weibo.js'
 import { checkWeiboArticle, publishWeiboDraft } from './weibo-publish.js'
@@ -37,6 +38,7 @@ const workspaceAssets = new Map([
   ['/weibo.ico', 'image/vnd.microsoft.icon'],
   ['/juejin.ico', 'image/vnd.microsoft.icon'],
   ['/jianshu.ico', 'image/vnd.microsoft.icon'],
+  ['/tieba.ico', 'image/vnd.microsoft.icon'],
 ])
 
 async function hasUpdate(currentVersion: string): Promise<boolean> {
@@ -165,6 +167,11 @@ async function createWindow(): Promise<void> {
     new URL(jianshuHome).origin, 'https://open.weixin.qq.com', 'https://graph.qq.com',
   ])
   const jianshu = new Jianshu((url, init) => jianshuSession.fetch(url, init))
+  const tiebaSession = session.fromPartition('persist:tieba')
+  const tiebaView = siteView(tiebaSession, [
+    new URL(tiebaHome).origin, 'https://passport.baidu.com', 'https://wappass.baidu.com',
+  ])
+  tiebaView.webContents.setWebRTCIPHandlingPolicy('disable_non_proxied_udp')
   const weiboSession = session.fromPartition('persist:weibo')
   const weiboView = siteView(weiboSession, [
     'https://weibo.com', 'https://www.weibo.com', 'https://card.weibo.com',
@@ -870,6 +877,21 @@ async function createWindow(): Promise<void> {
       const adapter = publicationSites[publicationPlatform(action)]
       return { name: (await adapter.account())?.name ?? null }
     },
+    'relay:open-tieba': async () => {
+      show(tiebaView, '百度贴吧账号')
+      const contents = tiebaView.webContents
+      const current = contents.getURL()
+      if (!current || current === 'about:blank' || current.startsWith('chrome-error:')) {
+        try {
+          await contents.loadURL(tiebaHome)
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ERR_ABORTED') throw error
+        }
+      }
+    },
+    'relay:tieba-account': async () => {
+      return { signedIn: await checkTiebaLogin((url, init) => tiebaSession.fetch(url, init)) }
+    },
     'relay:juejin-defaults': async () => {
       const account = await juejinSettingsAccount()
       const [categories, defaults] = await Promise.all([juejin.categories(), tasks.juejinDefaults(account.id)])
@@ -1100,7 +1122,7 @@ async function createWindow(): Promise<void> {
     juejinSession.webRequest.onBeforeRequest(null)
     for (const channel of Object.keys(handlers)) ipcMain.removeHandler(channel)
     zhihuDraftCheckView?.webContents.close()
-    for (const view of [sourceView, zhihuView, weiboView, juejinView, jianshuView]) view.webContents.close()
+    for (const view of [sourceView, zhihuView, weiboView, juejinView, jianshuView, tiebaView]) view.webContents.close()
   })
   await window.loadURL(workspaceUrl)
   const initialized = await window.webContents.executeJavaScript(`
