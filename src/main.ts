@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { chromiumUserAgent, publicationUrlStatus } from './browser.js'
+import { checkJianshuAccount, jianshuHome, jianshuLoginUrl } from './jianshu.js'
 import { monitorJuejinAudits } from './juejin-audit.js'
 import { Juejin, juejinArticleId, juejinArticles, juejinArticleUrl, juejinDefaultsRequired, juejinDraftUrl, juejinHome, juejinId,
   juejinReviewUrl, parseJuejinDefaults, type JuejinDefaults, type JuejinPublicationStatus } from './juejin.js'
@@ -35,6 +36,7 @@ const workspaceAssets = new Map([
   ['/zhihu.ico', 'image/vnd.microsoft.icon'],
   ['/weibo.ico', 'image/vnd.microsoft.icon'],
   ['/juejin.ico', 'image/vnd.microsoft.icon'],
+  ['/jianshu.ico', 'image/vnd.microsoft.icon'],
 ])
 
 async function hasUpdate(currentVersion: string): Promise<boolean> {
@@ -128,7 +130,7 @@ interface Action {
   runId?: string
   url?: string
   refresh?: boolean
-  platform?: Platform
+  platform?: Platform | 'jianshu'
   settingsOpen?: boolean
   openOnly?: boolean
   returnFromDraft?: boolean
@@ -158,6 +160,10 @@ async function createWindow(): Promise<void> {
   const zhihuSession = session.fromPartition('persist:zhihu')
   const zhihuView = siteView(zhihuSession, zhihuOrigins, false)
   const zhihu = new Zhihu((url, init) => zhihuSession.fetch(url, init))
+  const jianshuSession = session.fromPartition('persist:jianshu')
+  const jianshuView = siteView(jianshuSession, [
+    new URL(jianshuHome).origin, 'https://open.weixin.qq.com', 'https://graph.qq.com',
+  ])
   const weiboSession = session.fromPartition('persist:weibo')
   const weiboView = siteView(weiboSession, [
     'https://weibo.com', 'https://www.weibo.com', 'https://card.weibo.com',
@@ -375,7 +381,7 @@ async function createWindow(): Promise<void> {
 
   function publicationPlatform(action?: Action): Platform {
     if (action?.platform === undefined) return 'zhihu'
-    if (Object.hasOwn(platformNames, action.platform)) return action.platform
+    if (action.platform !== 'jianshu' && Object.hasOwn(platformNames, action.platform)) return action.platform
     throw new Error('不支持的发布平台。')
   }
 
@@ -794,7 +800,24 @@ async function createWindow(): Promise<void> {
         await juejinView.webContents.loadURL(juejinHome)
       }
     },
+    'relay:open-jianshu': async () => {
+      show(jianshuView, '简书账号')
+      const contents = jianshuView.webContents
+      const current = contents.getURL()
+      if (!current || current === 'about:blank' || current.startsWith('chrome-error:') ||
+          new URL(current).origin !== new URL(jianshuHome).origin) {
+        try {
+          await contents.loadURL(jianshuLoginUrl)
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ERR_ABORTED') throw error
+        }
+      }
+    },
     'relay:account': async (action?: Action) => {
+      if (action?.platform === 'jianshu') {
+        const account = await checkJianshuAccount((url, init) => jianshuSession.fetch(url, init))
+        return { name: account?.name ?? null }
+      }
       const adapter = publicationSites[publicationPlatform(action)]
       return { name: (await adapter.account())?.name ?? null }
     },
@@ -1010,7 +1033,7 @@ async function createWindow(): Promise<void> {
     juejinSession.webRequest.onBeforeRequest(null)
     for (const channel of Object.keys(handlers)) ipcMain.removeHandler(channel)
     zhihuDraftCheckView?.webContents.close()
-    for (const view of [sourceView, zhihuView, weiboView, juejinView]) view.webContents.close()
+    for (const view of [sourceView, zhihuView, weiboView, juejinView, jianshuView]) view.webContents.close()
   })
   await window.loadURL(workspaceUrl)
   const initialized = await window.webContents.executeJavaScript(`

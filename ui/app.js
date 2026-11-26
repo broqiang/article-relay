@@ -6,6 +6,11 @@ const platforms = {
   juejin: { name: '掘金', icon: 'juejin.ico', open: () => relay.openJuejin() },
 }
 const platformEntries = Object.entries(platforms)
+const accountPlatforms = {
+  ...platforms,
+  jianshu: { name: '简书', icon: 'jianshu.ico', open: () => relay.openJianshu() },
+}
+const accountEntries = Object.entries(accountPlatforms)
 const importLabels = {
   pending: '待导入', reading: '读取中', paused: '待继续', downloading: '下载图片中', ready: '已导入', failed: '导入失败',
 }
@@ -16,7 +21,7 @@ const runLabels = {
 const juejinAuditLabels = { reviewing: '已提交 · 审核中', rejected: '审核未通过' }
 const accountLabels = { checking: '正在检查登录状态…', signedIn: '已登录', signedOut: '未登录', unknown: '登录状态待确认' }
 const dateFormat = new Intl.DateTimeFormat('zh-CN', { dateStyle: 'short', timeStyle: 'short' })
-const accounts = Object.fromEntries(platformEntries.map(([id]) => [id, { state: 'checking' }]))
+const accounts = Object.fromEntries(accountEntries.map(([id]) => [id, { state: 'checking' }]))
 let tasks = []
 let selectedId
 let busy = false
@@ -155,9 +160,9 @@ function renderAccounts() {
   const signedIn = states.filter(({ state }) => state === 'signedIn').length
   const checking = states.some(({ state }) => state === 'checking')
   const unknown = states.filter(({ state }) => state === 'unknown').length
-  byId('account-summary').textContent = `支持 ${states.length} 个平台 · 已登录 ${signedIn} 个` +
+  byId('account-summary').textContent = `${states.length} 个平台可登录 · 已登录 ${signedIn} 个` +
     (checking ? ' · 检测中' : unknown ? ` · ${unknown} 个待确认` : '')
-  const rows = platformEntries.map(([id, platform]) => {
+  const rows = accountEntries.map(([id, platform]) => {
     const row = element('div', '', 'account-row')
     const identity = element('div', '', 'platform-identity')
     const account = accounts[id]
@@ -447,7 +452,7 @@ async function checkAccount(id) {
 async function openAccount(id) {
   screen = 'accounts'
   message(`登录后点击「返回账号列表」检查登录状态。`)
-  await platforms[id].open()
+  await accountPlatforms[id].open()
 }
 
 function juejinSettingsMessage(text, error = false) {
@@ -604,7 +609,7 @@ byId('back').addEventListener('click', () => void runAction(async () => {
     screen = screen === 'import' ? importReturnScreen : 'article'
     return
   }
-  const loginPlatform = platformEntries.find(([, platform]) => browserLabel === `${platform.name}账号`)?.[0]
+  const loginPlatform = accountEntries.find(([, platform]) => browserLabel === `${platform.name}账号`)?.[0]
   await relay.hideBrowser(true)
   if (loginPlatform) void checkAccount(loginPlatform).catch(() => {})
 }))
@@ -696,10 +701,10 @@ if (relay) {
   }).then((hasUpdate) => {
     byId('update-badge').hidden = !hasUpdate
   }).catch(() => {})
-  for (const [id] of platformEntries) void checkAccount(id).catch(() => {})
+  for (const [id] of accountEntries) void checkAccount(id).catch(() => {})
 } else {
   busy = true
-  for (const [id] of platformEntries) accounts[id] = { state: 'unknown' }
+  for (const [id] of accountEntries) accounts[id] = { state: 'unknown' }
   message('应用连接未能启动，请关闭并重新打开应用。', true)
   render()
 }

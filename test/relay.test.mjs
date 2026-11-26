@@ -13,6 +13,7 @@ import { checkZhihuArticle, publishZhihuDraft } from '../dist/zhihu-publish.js'
 import { Weibo, findWeiboPublishedUrl, isWeiboSsoCallback, weiboArticleUrl, weiboDraftUrl, weiboEditor, weiboHistoryUrl } from '../dist/weibo.js'
 import { checkWeiboArticle, publishWeiboDraft } from '../dist/weibo-publish.js'
 import { chromiumUserAgent, publicationUrlStatus } from '../dist/browser.js'
+import { checkJianshuAccount, jianshuHome } from '../dist/jianshu.js'
 import { blockingPublication, canCheckJuejinAudit, canOpenDraft, clearPublishedRun, publishMissingPlatforms, TaskStore, taskSummary } from '../dist/tasks.js'
 import { Juejin, juejinArticleId, juejinDraftUrl, parseJuejinDefaults } from '../dist/juejin.js'
 import { uploadJuejinImage } from '../dist/juejin-images.js'
@@ -52,10 +53,13 @@ test('initializes the bridge without CommonJS exports in a sandboxed preload', a
   assert.equal(await bridge.openZhihu(), 'relay:open-zhihu')
   assert.equal(await bridge.openWeibo(), 'relay:open-weibo')
   assert.equal(await bridge.openJuejin(), 'relay:open-juejin')
+  assert.equal(await bridge.openJianshu(), 'relay:open-jianshu')
   assert.equal(await bridge.getJuejinDefaults(), 'relay:juejin-defaults')
   assert.equal(JSON.stringify(await bridge.searchJuejinTags('123', 'JavaScript')),
     '{"channel":"relay:juejin-tags","args":{"owner":"123","query":"JavaScript"}}')
   assert.equal(await bridge.checkAccount(), 'relay:account')
+  assert.equal(JSON.stringify(await bridge.checkAccount('jianshu')),
+    '{"channel":"relay:account","args":{"platform":"jianshu"}}')
   assert.equal(JSON.stringify(await bridge.deleteTask('task')), '{"channel":"relay:delete-task","args":{"taskId":"task"}}')
   assert.equal(JSON.stringify(await bridge.deletePublication('task', 'run')), '{"channel":"relay:delete-publication","args":{"taskId":"task","runId":"run"}}')
   assert.equal(JSON.stringify(await bridge.publishAll('task')), '{"channel":"relay:publish-all","args":{"taskId":"task"}}')
@@ -76,6 +80,26 @@ test('initializes the bridge without CommonJS exports in a sandboxed preload', a
   weiboAccountChanged({ sender: 'internal event' }, '微博账号')
   weiboAccountChanged({ sender: 'internal event' }, null)
   assert.deepEqual(accounts, ['微博账号', null])
+})
+
+test('reads Jianshu account state without treating invalid pages as signed out', async () => {
+  const page = (data) => new Response(
+    `<script type="application/json" data-name="page-data">${JSON.stringify(data)}</script>`,
+  )
+  const signedOut = await checkJianshuAccount(async (url, init) => {
+    assert.equal(url, jianshuHome)
+    assert.equal(init.credentials, 'include')
+    assert.equal(init.cache, 'no-store')
+    assert.equal(init.redirect, 'manual')
+    return page({ user_signed_in: false })
+  })
+  assert.equal(signedOut, null)
+  assert.deepEqual(await checkJianshuAccount(async () =>
+    page({ user_signed_in: true, current_user: { id: 123, nickname: '测试账号' } })),
+  { id: '123', name: '测试账号' })
+  await assert.rejects(checkJianshuAccount(async () => page({ user_signed_in: true })), /无法识别|未返回可识别/)
+  await assert.rejects(checkJianshuAccount(async () => new Response('<html>验证码</html>')), /未返回可识别/)
+  await assert.rejects(checkJianshuAccount(async () => new Response(null, { status: 403 })), /HTTP 403/)
 })
 
 test('publishes only eligible platforms, keeps going after failures, and includes a cleared platform on retry', async () => {
