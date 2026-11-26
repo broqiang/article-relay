@@ -111,9 +111,7 @@ function runClass(run) {
 
 function taskStatus(task) {
   if (task.importState !== 'ready') {
-    const status = task.importState === 'failed' ? 'failed' :
-      ['reading', 'downloading'].includes(task.importState) ? 'in-progress' : ''
-    return element('span', importLabels[task.importState], `task-status ${status}`.trim())
+    return element('span', importLabels[task.importState], `task-status ${task.importState}`)
   }
   const current = platformEntries.map(([id]) => platformRun(task.runs.filter((run) => run.platform === id)))
   const published = current.filter((run) => run?.state === 'published').length
@@ -129,9 +127,8 @@ function taskStatus(task) {
     failures && `${failures} 个平台发布失败`,
   ].filter(Boolean)
   const status = failures || audit === 'rejected' ? 'failed' :
-    published === platformEntries.length ? 'published' :
-      checking || audit === 'reviewing' || working ? 'in-progress' : ''
-  return element('span', parts.join(' · ') || '待发布', `task-status ${status}`.trim())
+    published === platformEntries.length ? 'published' : 'in-progress'
+  return element('span', parts.join(' · ') || '待发布', `task-status ${status}`)
 }
 
 function renderControls(task) {
@@ -326,8 +323,10 @@ function renderPlatforms(task) {
     metadata.append(element('span', account))
     if (current) metadata.append(runTime(current))
     const state = current?.state
-    const label = current ? runLabel(current) : task.importState === 'ready' ? '待发布' : '待导入'
-    identity.append(element('strong', platform.name), metadata, element('span', label, current ? runClass(current) : 'run-state'))
+    const ready = task.importState === 'ready'
+    const label = current ? runLabel(current) : ready ? '待发布' : '待导入'
+    const labelClass = current ? runClass(current) : ready ? 'run-state pending' : 'run-state'
+    identity.append(element('strong', platform.name), metadata, element('span', label, labelClass))
     header.append(platformIcon(platform), identity)
     const canClearLocalHistory = id === 'juejin' && runs.length > 0 &&
       runs.every((run) => ['saved', 'failed', 'publish-uncertain'].includes(run.state))
@@ -393,7 +392,9 @@ function render() {
   byId('summary').hidden = !task
   byId('platform-results').hidden = !task
   if (task) {
-    byId('task-status').textContent = importLabels[task.importState]
+    const importStatus = byId('task-status')
+    importStatus.textContent = importLabels[task.importState]
+    importStatus.className = `result-status ${task.importState}`
     byId('task-title').textContent = task.title || '公众号文章'
     byId('task-source').textContent = task.sourceUrl
     byId('import-extraction').textContent = task.importState === 'ready' ? '' : task.extraction || ''
