@@ -119,8 +119,15 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
   font-weight: 500;
   white-space: nowrap;
 }
-.release-link:is(:hover, :focus-visible) #app-version { color: var(--accent); text-decoration: underline; }
-.update-badge { padding: 2px 6px; border-radius: 999px; color: #a22535; background: #fce8eb; font-size: 12px; font-weight: 600; }
+.release-link:is(:hover, :focus-visible) { color: var(--accent); background: #edf2fa; }
+.release-link:has(> .update-badge:not([hidden])) {
+  padding: 0 8px;
+  border-radius: 999px;
+  color: #a22535;
+  background: #fce8eb;
+}
+.release-link:has(> .update-badge:not([hidden])):is(:hover, :focus-visible) { background: #f8d9df; }
+.update-badge { padding-inline-start: 6px; border-inline-start: 1px solid #e6aab3; font-weight: 600; }
 .icon-button { display: grid; width: 36px; padding: 0; place-items: center; }
 #open-settings { anchor-name: --settings-button; }
 .app-actions:has(.settings-popover:popover-open) #open-settings { background: #edf2fa; }
