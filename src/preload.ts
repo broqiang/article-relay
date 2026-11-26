@@ -14,8 +14,6 @@ contextBridge.exposeInMainWorld('relay', {
   openWeibo: () => ipcRenderer.invoke('relay:open-weibo'),
   openJuejin: () => ipcRenderer.invoke('relay:open-juejin'),
   openJianshu: () => ipcRenderer.invoke('relay:open-jianshu'),
-  openTieba: () => ipcRenderer.invoke('relay:open-tieba'),
-  checkTiebaAccount: () => ipcRenderer.invoke('relay:tieba-account'),
   getJuejinDefaults: () => ipcRenderer.invoke('relay:juejin-defaults'),
   searchJuejinTags: (owner: string, query: string) => ipcRenderer.invoke('relay:juejin-tags', { owner, query }),
   saveJuejinDefaults: (owner: string, defaults: JuejinDefaults) => ipcRenderer.invoke('relay:save-juejin-defaults', { owner, defaults }),

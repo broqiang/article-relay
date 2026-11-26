@@ -9,7 +9,6 @@ const platforms = {
 const platformEntries = Object.entries(platforms)
 const accountPlatforms = {
   ...platforms,
-  tieba: { name: '百度贴吧', icon: 'tieba.ico', open: () => relay.openTieba() },
 }
 const accountEntries = Object.entries(accountPlatforms)
 const importLabels = {
@@ -449,7 +448,7 @@ async function runAction(work) {
 async function checkAccount(id) {
   const confirmation = confirmedWeiboAccount
   try {
-    const status = await (id === 'tieba' ? relay.checkTiebaAccount() : relay.checkAccount(id))
+    const status = await relay.checkAccount(id)
     if (id === 'weibo' && confirmation !== confirmedWeiboAccount) return Boolean(confirmedWeiboAccount.name)
     const signedIn = status.signedIn ?? Boolean(status.name)
     setAccount(id, signedIn ? 'signedIn' : 'signedOut', status.name)
@@ -463,8 +462,7 @@ async function checkAccount(id) {
 
 async function openAccount(id) {
   screen = 'accounts'
-  message(id === 'tieba' ? '点击贴吧页面中的「登录」，完成后返回账号列表。' :
-    '登录后点击「返回账号列表」检查登录状态。')
+  message('登录后点击「返回账号列表」检查登录状态。')
   await accountPlatforms[id].open()
 }
 

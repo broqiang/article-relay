@@ -176,7 +176,7 @@ export function taskSummary(task: Task) {
     importState: task.importState, importDetail: task.importDetail, extraction: task.extraction,
     total: urls.length, downloaded: urls.filter((url) => task.images.some((image) => image.url === url)).length,
     hasArticle: Boolean(task.article),
-    runs: task.runs.map((item) => {
+    runs: task.runs.filter((run) => Object.hasOwn(platformNames, run.platform)).map((item) => {
       const { owner: _owner, ...run } = item
       return { ...run, canOpenDraft: canOpenDraft(item, task.runs) }
     }),
@@ -217,6 +217,7 @@ export class TaskStore {
           interrupted = true
         }
         for (const run of task.runs) {
+          if (!Object.hasOwn(platformNames, run.platform)) continue
           if (run.state === 'publishing') {
             run.state = 'publish-uncertain'
             run.finishedAt = new Date().toISOString()
