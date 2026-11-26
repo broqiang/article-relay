@@ -237,7 +237,8 @@ export class TaskStore {
   }
 
   list() {
-    return this.tasks.map(taskSummary).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+    // New tasks are appended, and updates preserve their position in the saved list.
+    return this.tasks.map(taskSummary).reverse()
   }
 
   private async readJuejinDefaults(): Promise<Record<string, unknown>> {

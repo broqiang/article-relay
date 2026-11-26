@@ -81,7 +81,7 @@ function buttonIcon(name) {
 
 function button(icon, label, className, handler) {
   const control = element('button', label, className)
-  control.prepend(buttonIcon(icon))
+  if (icon) control.prepend(buttonIcon(icon))
   control.type = 'button'
   control.disabled = busy
   control.addEventListener('click', handler)
@@ -109,8 +109,12 @@ function runClass(run) {
   return `run-state ${run.juejinAudit || run.state}`
 }
 
-function taskLabel(task) {
-  if (task.importState !== 'ready') return importLabels[task.importState]
+function taskStatus(task) {
+  if (task.importState !== 'ready') {
+    const status = task.importState === 'failed' ? 'failed' :
+      ['reading', 'downloading'].includes(task.importState) ? 'in-progress' : ''
+    return element('span', importLabels[task.importState], `task-status ${status}`.trim())
+  }
   const current = platformEntries.map(([id]) => platformRun(task.runs.filter((run) => run.platform === id)))
   const published = current.filter((run) => run?.state === 'published').length
   const checking = current.filter((run) => run?.state === 'publish-uncertain' && !run.juejinAudit).length
@@ -124,7 +128,10 @@ function taskLabel(task) {
     working && '发布中',
     failures && `${failures} 个平台发布失败`,
   ].filter(Boolean)
-  return parts.join(' · ') || '待发布'
+  const status = failures || audit === 'rejected' ? 'failed' :
+    published === platformEntries.length ? 'published' :
+      checking || audit === 'reviewing' || working ? 'in-progress' : ''
+  return element('span', parts.join(' · ') || '待发布', `task-status ${status}`.trim())
 }
 
 function renderControls(task) {
@@ -371,14 +378,14 @@ function render() {
   list.replaceChildren()
   for (const item of tasks) {
     const row = document.createElement('li')
-    const control = button('document', '', 'task-button', () => void runAction(async () => {
+    const control = button(null, '', 'task-button', () => void runAction(async () => {
       selectedId = item.id
       screen = 'article'
       message('')
       await relay.hideBrowser()
     }))
     if (item === task && screen !== 'import') control.setAttribute('aria-current', 'true')
-    control.append(element('strong', item.title || '公众号文章'), element('small', taskLabel(item)))
+    control.append(element('strong', item.title || '公众号文章'), taskStatus(item))
     row.append(control)
     list.append(row)
   }

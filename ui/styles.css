@@ -46,7 +46,7 @@ h1 { font-size: 19px; }
 .help-page dd:last-child { margin-bottom: 0; }
 
 .workspace { height: calc(100vh - 72px); display: grid; grid-template-columns: 316px minmax(0, 1fr); }
-.sidebar { padding: 24px; border-right: 1px solid var(--line); background: #fff; overflow: auto; }
+.sidebar { padding: 24px 16px; border-right: 1px solid var(--line); background: #fff; overflow: auto; }
 h2 { font-size: 15px; font-weight: 650; }
 
 .account-entry {
@@ -61,7 +61,7 @@ h2 { font-size: 15px; font-weight: 650; }
   background: #f8fafd;
   text-align: left;
 }
-.account-entry > .button-icon, .task-button > .button-icon { grid-area: 1 / 1 / span 2; }
+.account-entry > .button-icon { grid-area: 1 / 1 / span 2; }
 .account-entry small { grid-column: 2; color: var(--muted); font-size: 12px; font-weight: 400; }
 .account-entry:hover:not(:disabled), .account-entry[aria-current] { background: #eff4fd; border-color: #d6e1f3; }
 .account-arrow { grid-column: 3; grid-row: 1 / 3; color: var(--muted); font-size: 21px; line-height: 1; }
@@ -155,28 +155,35 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
 .task-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .task-section > p { margin-top: 10px; font-size: 13px; }
 .task-list { list-style: none; padding: 0; margin: 10px 0 0; }
-.task-list li + li { margin-top: 6px; }
+.task-list li + li { margin-top: 8px; }
 .task-button {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  column-gap: 8px;
+  grid-template-columns: minmax(0, 1fr);
+  justify-items: start;
+  gap: 5px;
   width: 100%;
-  padding: 10px 12px;
+  padding: 10px;
   text-align: left;
   color: inherit;
-  background: transparent;
+  border-color: var(--line);
+  background: #f8fafd;
 }
-.task-button:hover:not(:disabled), .task-button[aria-current] { background: #eff4fd; border-color: #d6e1f3; }
+.task-button:hover:not(:disabled) { background: #eff4fd; border-color: #d6e1f3; }
+.task-button[aria-current], .task-button[aria-current]:hover:not(:disabled) { background: #dce8fc; border-color: #a9c1ec; }
 .task-button strong { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; line-height: 1.4; font-size: 13px; }
-.task-button small { display: block; margin-top: 4px; color: var(--muted); font-size: 12px; font-weight: 400; }
+.task-status { color: var(--muted); font-size: 12px; font-weight: 400; }
+.task-status.published { color: #1e694a; }
+.task-status.in-progress { color: #80500d; }
+.task-status.failed { color: #9d2635; }
 
-.stage { min-width: 0; min-height: 0; display: flex; flex-direction: column; padding: 0 24px 24px; }
+.stage { min-width: 0; min-height: 0; display: flex; flex-direction: column; padding: 0 16px 24px; }
 .stage-bar { height: 60px; flex: 0 0 60px; display: flex; align-items: center; gap: 14px; }
 .stage-bar h2 { flex: none; }
 .stage-actions { display: flex; gap: 8px; margin-left: auto; }
 .stage-bar .status { min-width: 0; margin: 0; font-size: 12px; }
 .stage-content { flex: 1; min-height: 0; overflow: auto; }
 .panel { padding: 22px 24px; border: 1px solid var(--line); border-radius: 12px; background: #fff; }
+#article-workspace > .panel { padding-inline: 16px; }
 .panel + .panel { margin-top: 14px; }
 .panel h3 { font-size: 15px; }
 

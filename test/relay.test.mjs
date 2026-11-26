@@ -1293,6 +1293,22 @@ test('preserves the legacy draft and task history across restarts', async (t) =>
   assert.equal(store.list()[0].runs[2].owner, undefined)
 })
 
+test('lists newer tasks first even after an older task is updated and the store is reopened', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'article-relay-order-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2025-01-01T00:00:00Z') })
+  const store = await TaskStore.open(root)
+  const first = await store.findOrCreate('https://mp.weixin.qq.com/s/first')
+  t.mock.timers.tick(1000)
+  const second = await store.findOrCreate('https://mp.weixin.qq.com/s/second')
+  t.mock.timers.tick(1000)
+  await store.update(first.id, { title: '更新后的标题' })
+  const order = [second.id, first.id]
+  assert.deepEqual(store.list().map(({ id }) => id), order)
+  const reopened = await TaskStore.open(root)
+  assert.deepEqual(reopened.list().map(({ id }) => id), order)
+})
+
 test('deletes only the selected task and its media, and allows the source to be imported again', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'article-relay-delete-'))
   t.after(() => rm(root, { recursive: true, force: true }))
