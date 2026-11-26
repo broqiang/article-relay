@@ -9,6 +9,8 @@ contextBridge.exposeInMainWorld('relay', {
   openReleases: () => ipcRenderer.invoke('relay:open-releases'),
   openRepository: () => ipcRenderer.invoke('relay:open-repository'),
   setSettingsOpen: (settingsOpen: boolean) => ipcRenderer.invoke('relay:settings-open', { settingsOpen }),
+  getEnabledPlatforms: () => ipcRenderer.invoke('relay:enabled-platforms'),
+  saveEnabledPlatforms: (enabledPlatforms: RelayPlatform[]) => ipcRenderer.invoke('relay:save-enabled-platforms', { enabledPlatforms }),
   restart: () => ipcRenderer.invoke('relay:restart'),
   openZhihu: () => ipcRenderer.invoke('relay:open-zhihu'),
   openWeibo: () => ipcRenderer.invoke('relay:open-weibo'),

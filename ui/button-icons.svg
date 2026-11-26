@@ -2,6 +2,10 @@
   <symbol id="tag" viewBox="0 0 24 24">
     <path d="M3 3h8l10 10-8 8L3 11V3Z"/><path d="M7.5 7.5h.01"/>
   </symbol>
+  <symbol id="settings" viewBox="0 2 24 24">
+    <path d="M10 3h4l.5 2.6.8.5 2.5-.9 2.8 2.8-.9 2.5.5.8 2.6.7v4l-2.6.5-.5.8.9 2.5-2.8 2.8-2.5-.9-.8.5L14 25h-4l-.5-2.6-.8-.5-2.5.9-2.8-2.8.9-2.5-.5-.8L1 16v-4l2.6-.5.5-.8-.9-2.5L6 5.4l2.5.9.8-.5L10 3Z"></path>
+    <circle cx="12" cy="14" r="3"></circle>
+  </symbol>
   <symbol id="restart" viewBox="0 0 24 24">
     <path d="M3 11a9 9 0 1 1 2.6 7.4M3 5v6h6"/>
   </symbol>

@@ -23,12 +23,10 @@
         <img src="github.svg" width="20" height="20" alt="">
       </button>
       <button id="open-settings" type="button" class="quiet icon-button" popovertarget="settings-popover" aria-label="设置" title="设置" disabled>
-        <svg width="20" height="20" viewBox="0 2 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <path d="M10 3h4l.5 2.6.8.5 2.5-.9 2.8 2.8-.9 2.5.5.8 2.6.7v4l-2.6.5-.5.8.9 2.5-2.8 2.8-2.5-.9-.8.5L14 25h-4l-.5-2.6-.8-.5-2.5.9-2.8-2.8.9-2.5-.5-.8L1 16v-4l2.6-.5.5-.8-.9-2.5L6 5.4l2.5.9.8-.5L10 3Z"></path>
-          <circle cx="12" cy="14" r="3"></circle>
-        </svg>
+        <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="button-icons.svg#settings"></use></svg>
       </button>
       <div id="settings-popover" class="settings-popover" popover="auto" role="group" aria-label="设置">
+        <button id="open-system-settings" type="button" class="quiet" disabled><svg class="button-icon" aria-hidden="true"><use href="button-icons.svg#settings"></use></svg>系统设置</button>
         <button id="restart" type="button" class="quiet"><svg class="button-icon" aria-hidden="true"><use href="button-icons.svg#restart"></use></svg>重启应用</button>
         <p id="settings-status" class="status error" role="status"></p>
       </div>
@@ -52,7 +50,7 @@
     </aside>
     <section class="stage" aria-labelledby="workspace-heading">
       <div class="stage-bar">
-        <h2 id="workspace-heading">同步工作区</h2>
+        <h2 id="workspace-heading" tabindex="-1">同步工作区</h2>
         <p id="browser-status" class="status" role="status" hidden></p>
         <div class="stage-actions">
           <button id="continue" type="button" class="primary" hidden><svg class="button-icon" aria-hidden="true"><use href="button-icons.svg#continue"></use></svg>继续读取文章</button>
@@ -99,20 +97,70 @@
       </div>
       <div class="stage-content" id="accounts-workspace" hidden>
         <section class="panel" aria-labelledby="accounts-heading">
-          <h3 id="accounts-heading">账号列表</h3>
+          <header class="accounts-panel-header">
+            <h3 id="accounts-heading">账号列表</h3>
+            <button id="check-all-accounts" type="button" class="quiet" disabled><svg class="button-icon" aria-hidden="true"><use href="button-icons.svg#search"></use></svg>检查全部登录</button>
+          </header>
           <div id="account-list"></div>
           <p id="account-status" class="status" role="status"></p>
         </section>
       </div>
+      <div class="stage-content" id="system-settings-workspace" hidden>
+        <section class="panel" aria-labelledby="platform-settings-heading">
+          <header class="accounts-panel-header">
+            <h3 id="platform-settings-heading">发布平台设置</h3>
+            <button id="edit-platform-settings" type="button" class="secondary" aria-label="设置发布平台" aria-haspopup="dialog">设置</button>
+          </header>
+          <ul id="platform-settings-summary" class="platform-settings-summary" aria-label="发布平台启用状态"></ul>
+        </section>
+        <section class="panel" aria-labelledby="defaults-settings-heading">
+          <h3 id="defaults-settings-heading">默认值设置</h3>
+          <section class="defaults-settings-card" aria-labelledby="juejin-defaults-heading">
+            <header class="accounts-panel-header">
+              <div class="defaults-settings-identity">
+                <img class="platform-icon" src="juejin.ico" alt="" width="32" height="32">
+                <div class="defaults-settings-title">
+                  <h4 id="juejin-defaults-heading">掘金发布默认值</h4>
+                  <span id="juejin-defaults-account" class="muted"></span>
+                </div>
+              </div>
+              <button id="open-juejin-defaults" type="button" class="secondary" aria-haspopup="dialog" hidden>编辑默认值</button>
+            </header>
+            <dl id="juejin-defaults-summary" class="defaults-settings-summary" hidden>
+              <dt>默认分类</dt>
+              <dd id="juejin-default-category"></dd>
+              <dt>默认标签</dt>
+              <dd id="juejin-default-tags" class="juejin-tag-list"></dd>
+            </dl>
+            <p id="juejin-defaults-card-status" class="status" role="status"></p>
+          </section>
+        </section>
+        <p id="system-settings-status" class="status" role="status"></p>
+      </div>
     </section>
   </main>
-  <dialog id="juejin-defaults-dialog" aria-labelledby="juejin-defaults-heading" aria-describedby="juejin-defaults-account">
-    <form id="juejin-defaults-form">
-      <header class="juejin-defaults-header">
-        <h3 id="juejin-defaults-heading" tabindex="-1" autofocus>掘金发布默认值</h3>
-        <p id="juejin-defaults-account" class="muted"></p>
-      </header>
-      <div class="juejin-defaults-body">
+  <dialog id="platform-settings-dialog" aria-labelledby="platform-settings-dialog-heading">
+    <form class="settings-form" id="platform-settings-form">
+      <h3 id="platform-settings-dialog-heading">发布平台设置</h3>
+      <div class="settings-body">
+        <div class="platform-selection-actions">
+          <button id="select-all-platforms" type="button" class="quiet">全选</button>
+          <button id="deselect-all-platforms" type="button" class="quiet">取消全选</button>
+        </div>
+        <div id="platform-options" role="group" aria-label="发布平台"></div>
+        <p id="platform-settings-status" class="status error" role="status"></p>
+      </div>
+      <footer class="settings-footer">
+        <button id="cancel-platform-settings" type="button" class="quiet">取消</button>
+        <button id="save-platform-settings" type="submit" class="primary" disabled>保存</button>
+      </footer>
+    </form>
+  </dialog>
+  <dialog id="juejin-defaults-dialog" aria-labelledby="juejin-defaults-dialog-heading">
+    <form id="juejin-defaults-form" class="settings-form">
+      <h3 id="juejin-defaults-dialog-heading">掘金发布默认值</h3>
+      <div class="settings-body">
+        <p id="juejin-defaults-dialog-account" class="status"></p>
         <div class="juejin-defaults-field">
           <label for="juejin-category">默认分类</label>
           <select id="juejin-category" required></select>
@@ -128,7 +176,7 @@
         </div>
         <p id="juejin-defaults-status" class="status" role="status"></p>
       </div>
-      <footer class="juejin-defaults-footer">
+      <footer class="settings-footer">
         <button id="juejin-close-defaults" type="button" class="quiet">取消</button>
         <button id="juejin-save-defaults" type="submit" class="primary">保存</button>
       </footer>

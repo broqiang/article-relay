@@ -7,10 +7,8 @@ const platforms = {
   jianshu: { name: '简书', icon: 'jianshu.ico', open: () => relay.openJianshu() },
 }
 const platformEntries = Object.entries(platforms)
-const accountPlatforms = {
-  ...platforms,
-}
-const accountEntries = Object.entries(accountPlatforms)
+let enabledPlatforms = []
+const enabledEntries = () => platformEntries.filter(([id]) => enabledPlatforms.includes(id))
 const importLabels = {
   pending: '待导入', reading: '读取中', paused: '待继续', downloading: '下载图片中', ready: '已导入', failed: '导入失败',
 }
@@ -21,21 +19,25 @@ const runLabels = {
 const juejinAuditLabels = { reviewing: '已提交 · 审核中', rejected: '审核未通过' }
 const accountLabels = { checking: '正在检查登录状态…', signedIn: '已登录', signedOut: '未登录', unknown: '登录状态待确认' }
 const dateFormat = new Intl.DateTimeFormat('zh-CN', { dateStyle: 'short', timeStyle: 'short' })
-const accounts = Object.fromEntries(accountEntries.map(([id]) => [id, { state: 'checking' }]))
+const accounts = Object.fromEntries(platformEntries.map(([id]) => [id, { state: 'checking' }]))
 let tasks = []
 let selectedId
 let busy = false
 let screen = 'article'
 let importReturnScreen = 'article'
+let settingsReturnScreen = 'article'
 let browserLabel = ''
 let pendingMessage = ''
 let messageIsError = false
 let confirmedWeiboAccount
+let juejinDefaults
 let juejinSettings
 
 function renderMessage() {
-  const target = browserLabel ? 'browser-status' : { article: 'status', accounts: 'account-status', import: 'import-status' }[screen]
-  for (const id of ['status', 'account-status', 'import-status', 'browser-status']) {
+  const target = browserLabel ? 'browser-status' : {
+    article: 'status', accounts: 'account-status', import: 'import-status', 'system-settings': 'system-settings-status',
+  }[screen]
+  for (const id of ['status', 'account-status', 'import-status', 'browser-status', 'system-settings-status']) {
     const node = byId(id)
     node.textContent = id === target ? pendingMessage : ''
     node.classList.toggle('error', id === target && messageIsError)
@@ -50,14 +52,19 @@ function message(text, error = false) {
 
 function renderScreen() {
   const managing = screen === 'accounts'
-  byId('workspace-heading').textContent = browserLabel || { article: '同步工作区', accounts: '发布账号', import: '导入文章' }[screen]
-  for (const page of ['article', 'accounts', 'import']) {
+  byId('workspace-heading').textContent = browserLabel || {
+    article: '同步工作区', accounts: '发布账号', import: '导入文章', 'system-settings': '系统设置',
+  }[screen]
+  for (const page of ['article', 'accounts', 'import', 'system-settings']) {
     byId(`${page}-workspace`).hidden = screen !== page || Boolean(browserLabel)
   }
   byId('browser-status').hidden = !browserLabel
   byId('back').hidden = !browserLabel && screen === 'article'
-  const backToAccounts = browserLabel && managing || screen === 'import' && importReturnScreen === 'accounts'
-  byId('back-label').textContent = backToAccounts ? '返回账号列表' : '返回工作区'
+  const backToAccounts = browserLabel && managing || screen === 'import' && importReturnScreen === 'accounts' ||
+    screen === 'system-settings' && settingsReturnScreen === 'accounts'
+  byId('back-label').textContent = backToAccounts ? '返回账号列表' :
+    screen === 'system-settings' && settingsReturnScreen === 'import' ? '返回导入文章' : '返回工作区'
+  if ((screen !== 'system-settings' || browserLabel) && juejinSettings) closeJuejinDefaults()
   if (managing) byId('open-accounts').setAttribute('aria-current', 'page')
   else byId('open-accounts').removeAttribute('aria-current')
   if (screen === 'import') byId('open-import').setAttribute('aria-current', 'page')
@@ -117,7 +124,7 @@ function taskStatus(task) {
   if (task.importState !== 'ready') {
     return element('span', importLabels[task.importState], `task-status ${task.importState}`)
   }
-  const current = platformEntries.map(([id]) => platformRun(task.runs.filter((run) => run.platform === id)))
+  const current = enabledPlatforms.map((id) => platformRun(task.runs.filter((run) => run.platform === id)))
   const published = current.filter((run) => run?.state === 'published').length
   const checking = current.filter((run) => run?.state === 'publish-uncertain' && !run.juejinAudit).length
   const audit = current.find((run) => run?.juejinAudit)?.juejinAudit
@@ -131,14 +138,20 @@ function taskStatus(task) {
     failures && `${failures} 个平台发布失败`,
   ].filter(Boolean)
   const status = failures || audit === 'rejected' ? 'failed' :
-    published === platformEntries.length ? 'published' : 'in-progress'
+    published > 0 && published === enabledPlatforms.length ? 'published' : 'in-progress'
   return element('span', parts.join(' · ') || '待发布', `task-status ${status}`)
 }
 
 function renderControls(task) {
-  document.querySelectorAll('.workspace button, .workspace input, #restart').forEach((control) => { control.disabled = busy })
+  document.querySelectorAll('.workspace button, .workspace input, #restart').forEach((control) => {
+    if (!control.closest('#system-settings-workspace')) control.disabled = busy
+  })
+  byId('open-system-settings').disabled = busy || !enabledPlatforms.length
+  byId('edit-platform-settings').disabled = busy || !enabledPlatforms.length
+  byId('check-all-accounts').disabled = busy || !enabledPlatforms.length
+  renderJuejinDefaultsCard()
   const ready = task?.importState === 'ready'
-  const canPublish = ready && platformEntries.some(([id]) => {
+  const canPublish = ready && enabledPlatforms.some((id) => {
     const run = platformRun(task.runs.filter((item) => item.platform === id))
     return !['published', 'publish-uncertain', 'publishing'].includes(run?.state)
   })
@@ -159,14 +172,27 @@ function platformIcon(platform) {
   return icon
 }
 
+function renderPlatformSettingsSummary() {
+  const items = platformEntries.map(([id, platform]) => {
+    const item = document.createElement('li')
+    const enabled = enabledPlatforms.includes(id)
+    item.classList.toggle('enabled', enabled)
+    const status = element('span', enabled ? '已启用' : '未启用', 'platform-setting-state')
+    if (enabled) status.prepend(buttonIcon('check'))
+    item.append(platformIcon(platform), element('span', platform.name, 'platform-setting-name'), status)
+    return item
+  })
+  byId('platform-settings-summary').replaceChildren(...items)
+}
+
 function renderAccounts() {
-  const states = Object.values(accounts)
+  const states = enabledPlatforms.map((id) => accounts[id])
   const signedIn = states.filter(({ state }) => state === 'signedIn').length
   const checking = states.some(({ state }) => state === 'checking')
   const unknown = states.filter(({ state }) => state === 'unknown').length
   byId('account-summary').textContent = `${states.length} 个平台可登录 · 已登录 ${signedIn} 个` +
     (checking ? ' · 检测中' : unknown ? ` · ${unknown} 个待确认` : '')
-  const rows = accountEntries.map(([id, platform]) => {
+  const rows = enabledEntries().map(([id, platform]) => {
     const row = element('div', '', 'account-row')
     const identity = element('div', '', 'platform-identity')
     const account = accounts[id]
@@ -178,7 +204,6 @@ function renderAccounts() {
     identity.append(heading)
     if (account.name) identity.append(element('small', account.name, 'muted'))
     const actions = element('div', '', 'platform-actions')
-    if (id === 'juejin') actions.append(button('check', '发布默认值', 'quiet', () => void runAction(openJuejinDefaults)))
     actions.append(
       button('login', account.state === 'signedOut' ? '登录' : `打开${platform.name}`, 'secondary', () => void runAction(() => openAccount(id))),
       button('search', '检查登录', 'quiet', () => void runAction(async () => {
@@ -314,7 +339,7 @@ function platformAction(task, id, run) {
 function renderPlatforms(task) {
   const list = byId('platform-list')
   const detailsState = new Map([...list.querySelectorAll('details')].map((node) => [node.dataset.detailsKey, node.open]))
-  list.replaceChildren(...platformEntries.map(([id, platform]) => {
+  list.replaceChildren(...enabledEntries().map(([id, platform]) => {
     const runs = task.runs.filter((run) => run.platform === id)
     const current = platformRun(runs)
     const row = element('article', '', 'platform-row')
@@ -446,16 +471,17 @@ async function runAction(work) {
 }
 
 async function checkAccount(id) {
+  const previous = accounts[id]
   const confirmation = confirmedWeiboAccount
   try {
     const status = await relay.checkAccount(id)
     if (id === 'weibo' && confirmation !== confirmedWeiboAccount) return Boolean(confirmedWeiboAccount.name)
     const signedIn = status.signedIn ?? Boolean(status.name)
-    setAccount(id, signedIn ? 'signedIn' : 'signedOut', status.name)
+    if (enabledPlatforms.includes(id) && accounts[id] === previous) setAccount(id, signedIn ? 'signedIn' : 'signedOut', status.name)
     return signedIn
   } catch (error) {
     if (id === 'weibo' && confirmation !== confirmedWeiboAccount) return Boolean(confirmedWeiboAccount.name)
-    setAccount(id, 'unknown')
+    if (enabledPlatforms.includes(id) && accounts[id] === previous) setAccount(id, 'unknown')
     throw error
   }
 }
@@ -463,13 +489,59 @@ async function checkAccount(id) {
 async function openAccount(id) {
   screen = 'accounts'
   message('登录后点击「返回账号列表」检查登录状态。')
-  await accountPlatforms[id].open()
+  await platforms[id].open()
 }
 
 function juejinSettingsMessage(text, error = false) {
   const node = byId('juejin-defaults-status')
   node.textContent = text
   node.classList.toggle('error', error)
+}
+
+function renderJuejinDefaultsCard() {
+  const enabled = enabledPlatforms.includes('juejin')
+  const loaded = enabled && juejinDefaults
+  const edit = byId('open-juejin-defaults')
+  edit.hidden = !enabled
+  edit.disabled = busy
+  byId('juejin-defaults-summary').hidden = !loaded
+  byId('juejin-defaults-account').textContent = loaded ? juejinDefaults.account.name : ''
+  if (!loaded) return
+  const defaults = juejinDefaults.defaults
+  byId('juejin-default-category').textContent = defaults?.category.name ?? '未设置'
+  const tags = byId('juejin-default-tags')
+  if (defaults?.tags.length) {
+    tags.replaceChildren(...defaults.tags.map(({ name }) => element('span', name, 'juejin-summary-tag')))
+  } else {
+    tags.textContent = '未设置'
+  }
+}
+
+async function loadJuejinDefaults() {
+  const status = byId('juejin-defaults-card-status')
+  status.classList.remove('error')
+  status.textContent = ''
+  if (!enabledPlatforms.includes('juejin')) {
+    juejinDefaults = undefined
+    status.textContent = '请先在上方启用掘金并保存。'
+    renderJuejinDefaultsCard()
+    return
+  }
+  status.textContent = '正在读取掘金发布默认值…'
+  try {
+    juejinDefaults = await relay.getJuejinDefaults()
+    status.textContent = ''
+  } catch (error) {
+    juejinDefaults = undefined
+    status.textContent = errorText(error)
+    status.classList.add('error')
+  }
+  renderJuejinDefaultsCard()
+}
+
+function closeJuejinDefaults() {
+  juejinSettings = undefined
+  byId('juejin-defaults-dialog').close()
 }
 
 function renderJuejinTags() {
@@ -502,18 +574,19 @@ function renderJuejinTags() {
     (account.tagLimit !== undefined && tags.length > account.tagLimit)
 }
 
-async function openJuejinDefaults() {
-  const { account, categories, defaults } = await relay.getJuejinDefaults()
-  juejinSettings = { account, categories, tags: defaults?.tags ?? [], found: [], saving: false, searching: false }
+function openJuejinDefaults() {
+  const { account, categories, defaults } = juejinDefaults
+  juejinSettings = { account, categories, tags: [...(defaults?.tags ?? [])], found: [], saving: false, searching: false }
   const select = byId('juejin-category')
   select.replaceChildren(new Option('请选择分类', ''), ...categories.map(({ id, name }) => new Option(name, id)))
   select.value = categories.some(({ id }) => id === defaults?.category.id) ? defaults.category.id : ''
-  byId('juejin-defaults-account').textContent = account.tagLimit === undefined ? account.name :
+  byId('juejin-defaults-dialog-account').textContent = account.tagLimit === undefined ? account.name :
     `${account.name} · 最多 ${account.tagLimit} 个标签`
   byId('juejin-tag-query').value = ''
   juejinSettingsMessage(account.tagLimit === 0 ? '当前掘金账号暂时无法添加标签。' : '')
   renderJuejinTags()
   byId('juejin-defaults-dialog').showModal()
+  select.focus()
 }
 
 async function searchJuejinTags() {
@@ -586,12 +659,26 @@ byId('open-accounts').addEventListener('click', () => void runAction(async () =>
   message('')
   await relay.hideBrowser()
 }))
+byId('check-all-accounts').addEventListener('click', () => void runAction(async () => {
+  message('正在检查所有已启用平台的登录状态…')
+  for (const id of enabledPlatforms) accounts[id] = { ...accounts[id], state: 'checking' }
+  renderAccounts()
+  renderControls(selectedTask())
+  const results = await Promise.allSettled(enabledPlatforms.map(checkAccount))
+  const signedIn = results.filter((result) => result.status === 'fulfilled' && result.value).length
+  const signedOut = results.filter((result) => result.status === 'fulfilled' && !result.value).length
+  const unknown = results.length - signedIn - signedOut
+  message(`检查完成，已登录 ${signedIn} 个，未登录 ${signedOut} 个` +
+    (unknown ? `，${unknown} 个平台的登录状态待确认。` : '。'), unknown > 0)
+}))
 byId('open-import').addEventListener('click', async () => {
   if (busy) return
   if (screen !== 'import') {
     await runAction(async () => {
       if (browserLabel) await relay.hideBrowser(true)
-      importReturnScreen = screen
+      if (screen !== 'system-settings' || settingsReturnScreen !== 'import') {
+        importReturnScreen = screen === 'system-settings' ? settingsReturnScreen : screen
+      }
       screen = 'import'
       message('')
     })
@@ -617,20 +704,29 @@ byId('delete-task').addEventListener('click', () => void runAction(async () => {
 byId('back').addEventListener('click', () => void runAction(async () => {
   message('')
   if (!browserLabel) {
-    screen = screen === 'import' ? importReturnScreen : 'article'
+    if (screen === 'import') screen = importReturnScreen
+    else if (screen === 'system-settings') screen = settingsReturnScreen
+    else screen = 'article'
     return
   }
-  const loginPlatform = accountEntries.find(([, platform]) => browserLabel === `${platform.name}账号`)?.[0]
+  const loginPlatform = enabledEntries().find(([, platform]) => browserLabel === `${platform.name}账号`)?.[0]
   await relay.hideBrowser(true)
   if (loginPlatform) void checkAccount(loginPlatform).catch(() => {})
 }))
 if (relay) {
-  const defaultsDialog = byId('juejin-defaults-dialog')
-  defaultsDialog.addEventListener('close', () => { juejinSettings = undefined })
-  defaultsDialog.addEventListener('cancel', (event) => {
-    if (juejinSettings?.saving) event.preventDefault()
+  byId('open-juejin-defaults').addEventListener('click', async () => {
+    if (busy) return
+    await runAction(loadJuejinDefaults)
+    if (juejinDefaults && screen === 'system-settings' && !browserLabel) {
+      byId('open-juejin-defaults').focus()
+      openJuejinDefaults()
+    }
   })
-  byId('juejin-close-defaults').addEventListener('click', () => defaultsDialog.close())
+  byId('juejin-close-defaults').addEventListener('click', closeJuejinDefaults)
+  byId('juejin-defaults-dialog').addEventListener('cancel', (event) => {
+    event.preventDefault()
+    if (!juejinSettings?.saving) closeJuejinDefaults()
+  })
   byId('juejin-category').addEventListener('change', renderJuejinTags)
   byId('juejin-search-tags').addEventListener('click', () => void searchJuejinTags())
   byId('juejin-tag-query').addEventListener('keydown', (event) => {
@@ -642,19 +738,23 @@ if (relay) {
     event.preventDefault()
     const settings = juejinSettings
     const category = settings?.categories.find(({ id }) => id === byId('juejin-category').value)
-    if (!category || !settings.tags.length || settings.saving) return
+    if (!category || byId('juejin-save-defaults').disabled) return
     settings.saving = true
     juejinSettingsMessage('正在保存发布默认值…')
     renderJuejinTags()
     try {
-      await relay.saveJuejinDefaults(settings.account.id, { category, tags: settings.tags })
-      defaultsDialog.close()
-      message('掘金发布默认值已保存。')
+      const defaults = await relay.saveJuejinDefaults(settings.account.id, { category, tags: settings.tags })
+      if (settings !== juejinSettings) return
+      juejinDefaults = { ...juejinDefaults, defaults }
+      renderJuejinDefaultsCard()
+      byId('juejin-defaults-card-status').textContent = '掘金发布默认值已保存。'
+      closeJuejinDefaults()
     } catch (error) {
-      juejinSettingsMessage(errorText(error), true)
-    } finally {
-      settings.saving = false
-      if (defaultsDialog.open && settings === juejinSettings) renderJuejinTags()
+      if (settings === juejinSettings) {
+        settings.saving = false
+        juejinSettingsMessage(errorText(error), true)
+        renderJuejinTags()
+      }
     }
   })
 
@@ -670,17 +770,114 @@ if (relay) {
 
   const settings = byId('settings-popover')
   const settingsStatus = byId('settings-status')
+  const platformDialog = byId('platform-settings-dialog')
+  const editPlatforms = byId('edit-platform-settings')
+  const platformForm = byId('platform-settings-form')
+  const platformStatus = byId('platform-settings-status')
+  let savingPlatforms = false
+
+  function updateSettingsVisibility() {
+    return relay.setSettingsOpen(settings.matches(':popover-open')).catch((error) => {
+      message(errorText(error), true)
+    })
+  }
+
+  function platformOptions() {
+    return [...byId('platform-options').querySelectorAll('input')]
+  }
+
+  function renderPlatformSelection() {
+    const options = platformOptions()
+    const anySelected = options.some((option) => option.checked)
+    for (const option of options) option.disabled = savingPlatforms
+    byId('select-all-platforms').disabled = savingPlatforms || options.every((option) => option.checked)
+    byId('deselect-all-platforms').disabled = savingPlatforms || !anySelected
+    byId('cancel-platform-settings').disabled = savingPlatforms
+    byId('save-platform-settings').disabled = savingPlatforms || !anySelected
+    platformStatus.textContent = anySelected ? '' : '请至少选择一个发布平台。'
+    platformStatus.classList.toggle('error', !anySelected)
+  }
+
+  function resetPlatformSelection() {
+    const options = platformEntries.map(([id, platform]) => {
+      const label = element('label', '', 'platform-option')
+      const input = document.createElement('input')
+      input.type = 'checkbox'
+      input.value = id
+      input.checked = enabledPlatforms.includes(id)
+      label.append(input, platformIcon(platform), element('span', platform.name))
+      return label
+    })
+    byId('platform-options').replaceChildren(...options)
+    renderPlatformSelection()
+  }
+
+  byId('open-system-settings').addEventListener('click', () => void runAction(async () => {
+    if (screen !== 'system-settings') {
+      if (browserLabel) await relay.hideBrowser(true)
+      settings.hidePopover()
+      settingsReturnScreen = screen
+      screen = 'system-settings'
+      renderPlatformSettingsSummary()
+      juejinDefaults = undefined
+      renderJuejinDefaultsCard()
+      message('')
+      renderScreen()
+      byId('system-settings-workspace').scrollTop = 0
+      byId('workspace-heading').focus()
+      await loadJuejinDefaults()
+    } else {
+      settings.hidePopover()
+    }
+  }))
+  platformForm.addEventListener('change', renderPlatformSelection)
+  for (const [id, checked] of [['select-all-platforms', true], ['deselect-all-platforms', false]]) {
+    byId(id).addEventListener('click', () => {
+      for (const option of platformOptions()) option.checked = checked
+      renderPlatformSelection()
+    })
+  }
+  editPlatforms.addEventListener('click', () => {
+    resetPlatformSelection()
+    platformDialog.showModal()
+  })
+  byId('cancel-platform-settings').addEventListener('click', () => platformDialog.close())
+  platformDialog.addEventListener('cancel', (event) => {
+    if (savingPlatforms) event.preventDefault()
+  })
+  platformDialog.addEventListener('close', () => editPlatforms.focus())
+  platformForm.addEventListener('submit', (event) => {
+    event.preventDefault()
+    const selected = platformOptions().filter((option) => option.checked).map((option) => option.value)
+    if (savingPlatforms || !selected.length) return
+    void runAction(async () => {
+      const previous = enabledPlatforms
+      savingPlatforms = true
+      renderPlatformSelection()
+      try {
+        enabledPlatforms = await relay.saveEnabledPlatforms(selected)
+        const newlyEnabled = enabledPlatforms.filter((id) => !previous.includes(id))
+        for (const id of newlyEnabled) accounts[id] = { state: 'checking' }
+        savingPlatforms = false
+        renderPlatformSettingsSummary()
+        platformDialog.close()
+        message('发布平台设置已保存。')
+        for (const id of newlyEnabled) void checkAccount(id).catch(() => {})
+        if (previous.includes('juejin') !== enabledPlatforms.includes('juejin')) await loadJuejinDefaults()
+      } catch (error) {
+        savingPlatforms = false
+        renderPlatformSelection()
+        platformStatus.textContent = errorText(error)
+        platformStatus.classList.add('error')
+      }
+    })
+  })
+
   byId('open-settings').disabled = false
   settings.addEventListener('beforetoggle', (event) => {
     if (event.newState === 'open') settingsStatus.textContent = ''
   })
-  settings.addEventListener('toggle', (event) => {
-    const open = event.newState === 'open'
-    void relay.setSettingsOpen(open).catch((error) => {
-      if (open) settings.hidePopover()
-      message(errorText(error), true)
-    })
-  })
+  settings.addEventListener('toggle', () => void updateSettingsVisibility())
   byId('restart').addEventListener('click', () => void runAction(async () => {
     settingsStatus.textContent = ''
     try {
@@ -700,11 +897,17 @@ if (relay) {
     renderControls(selectedTask())
   })
   relay.onWeiboAccountChanged((name) => {
+    if (!enabledPlatforms.includes('weibo')) return
     confirmedWeiboAccount = { name }
     setAccount('weibo', name ? 'signedIn' : 'signedOut', name)
   })
   relay.onTasksChanged(updateTasks)
-  void runAction(async () => updateTasks(await relay.listTasks()))
+  void runAction(async () => {
+    const [configuredPlatforms, items] = await Promise.all([relay.getEnabledPlatforms(), relay.listTasks()])
+    enabledPlatforms = configuredPlatforms
+    updateTasks(items)
+    for (const id of enabledPlatforms) void checkAccount(id).catch(() => {})
+  })
   void relay.getVersion().then((version) => {
     byId('app-version').textContent = `v${version}`
     releaseLink.hidden = false
@@ -712,7 +915,6 @@ if (relay) {
   }).then((hasUpdate) => {
     byId('update-badge').hidden = !hasUpdate
   }).catch(() => {})
-  for (const [id] of accountEntries) void checkAccount(id).catch(() => {})
 } else {
   busy = true
   for (const [id] of platformEntries) accounts[id] = { state: 'unknown' }

@@ -266,6 +266,30 @@ test('publishes only eligible platforms, keeps going after failures, and include
   assert.deepEqual(attempts, [])
 })
 
+test('persists enabled platforms and includes only those platforms in batch publication', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'article-relay-platforms-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const store = await TaskStore.open(root)
+  assert.deepEqual(await store.enabledPlatforms(), ['zhihu', 'weibo', 'juejin'])
+  assert.deepEqual(await store.saveEnabledPlatforms(['jianshu', 'weibo']), ['weibo', 'jianshu'])
+  await assert.rejects(store.saveEnabledPlatforms([]), /至少选择一个/)
+  await assert.rejects(store.saveEnabledPlatforms(['weibo', 'unknown']), /不支持/)
+  const reopened = await TaskStore.open(root)
+  const enabled = await reopened.enabledPlatforms()
+  assert.deepEqual(enabled, ['weibo', 'jianshu'])
+
+  const task = { importState: 'ready', article: {}, runs: [{ platform: 'weibo', state: 'published' }] }
+  const attempts = []
+  const outcomes = await publishMissingPlatforms(() => task, async (_task, platform) => {
+    attempts.push(platform)
+    return { published: true }
+  }, enabled)
+  assert.deepEqual(attempts, ['jianshu'])
+  assert.deepEqual(outcomes.map(({ platform, state }) => [platform, state]), [
+    ['weibo', 'already-published'], ['jianshu', 'published'],
+  ])
+})
+
 test('checks the Juejin account and reuses only its own draft with the saved publishing fields', async () => {
   const id = '7325611798135062578'
   const owner = '254742430764728'

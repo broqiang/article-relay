@@ -12,6 +12,16 @@ export type ImportState = 'pending' | 'reading' | 'paused' | 'downloading' | 're
 
 export const platformNames = { zhihu: '知乎', weibo: '微博', juejin: '掘金', jianshu: '简书' } as const
 export type Platform = keyof typeof platformNames
+const allPlatforms = Object.keys(platformNames) as Platform[]
+const defaultPlatforms = allPlatforms.filter((platform) => platform !== 'jianshu')
+
+function parseEnabledPlatforms(value: unknown): Platform[] {
+  if (!Array.isArray(value) || !value.length) throw new Error('请至少选择一个发布平台。')
+  if (value.some((platform) => typeof platform !== 'string' || !Object.hasOwn(platformNames, platform))) {
+    throw new Error('包含不支持的发布平台。')
+  }
+  return allPlatforms.filter((platform) => value.includes(platform))
+}
 
 export interface SyncRun {
   id: string
@@ -94,11 +104,12 @@ export async function publishMissingPlatforms(
   publish: (task: Task, platform: Platform) => Promise<{
     published?: boolean; loginRequired?: boolean; saved?: boolean; reviewing?: boolean; publishNotice?: string
   }>,
+  platforms: readonly Platform[] = allPlatforms,
 ): Promise<{ platform: Platform; state: BatchState; detail?: string }[]> {
   const task = getTask()
   if (task.importState !== 'ready' || !task.article) throw new Error('请先完成公众号文章导入。')
   const outcomes: { platform: Platform; state: BatchState; detail?: string }[] = []
-  for (const platform of Object.keys(platformNames) as Platform[]) {
+  for (const platform of platforms) {
     const current = getTask()
     const prior = blockingPublication(current.runs, platform)
     if (prior) {
@@ -240,6 +251,17 @@ export class TaskStore {
   list() {
     // New tasks are appended, and updates preserve their position in the saved list.
     return this.tasks.map(taskSummary).reverse()
+  }
+
+  async enabledPlatforms(): Promise<Platform[]> {
+    const content = await readOptional(join(this.root, 'publication-platforms.json'))
+    return content === undefined ? [...defaultPlatforms] : parseEnabledPlatforms(JSON.parse(content))
+  }
+
+  async saveEnabledPlatforms(value: unknown): Promise<Platform[]> {
+    const platforms = parseEnabledPlatforms(value)
+    await atomicWrite(join(this.root, 'publication-platforms.json'), JSON.stringify(platforms))
+    return platforms
   }
 
   private async readJuejinDefaults(): Promise<Record<string, unknown>> {

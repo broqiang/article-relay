@@ -137,10 +137,12 @@ interface Action {
   owner?: string
   query?: string
   defaults?: unknown
+  enabledPlatforms?: unknown
 }
 
 async function createWindow(): Promise<void> {
   const tasks = await TaskStore.open(app.getPath('userData'))
+  let enabledPlatforms = await tasks.enabledPlatforms()
   const window = new BrowserWindow({
     width: 1280, height: 840, minWidth: 900, minHeight: 660,
     backgroundColor: '#f3f5f9', autoHideMenuBar: true,
@@ -182,6 +184,7 @@ async function createWindow(): Promise<void> {
   })
   const publicationSites = { zhihu, weibo, juejin, jianshu }
   const publicationSessions = { zhihu: zhihuSession, weibo: weiboSession, juejin: juejinSession, jianshu: jianshuSession }
+  const publicationViews = { zhihu: zhihuView, weibo: weiboView, juejin: juejinView, jianshu: jianshuView }
   let activeView: WebContentsView | undefined
   let activeDraft: { taskId: string; runId: string } | undefined
   let zhihuDraftCheckView: WebContentsView | undefined
@@ -374,16 +377,22 @@ async function createWindow(): Promise<void> {
   }
 
   function assertCanPublish(task: Task, platform: Platform): void {
+    assertPlatformEnabled(platform)
     const prior = blockingPublication(task.runs, platform)
     const name = platformNames[platform]
     if (prior?.state === 'published') throw new Error(`这篇文章已发布到${name}，可在该平台的记录中查看。`)
     if (prior) throw new Error(`上一次发布的结果尚未确认，请先在${name}核对。`)
   }
 
+  function assertPlatformEnabled(platform: Platform): void {
+    if (!enabledPlatforms.includes(platform)) throw new Error(`${platformNames[platform]}未启用，请先在发布平台设置中勾选。`)
+  }
+
   function publicationPlatform(action?: Action): Platform {
-    if (action?.platform === undefined) return 'zhihu'
-    if (Object.hasOwn(platformNames, action.platform)) return action.platform
-    throw new Error('不支持的发布平台。')
+    const platform = action?.platform ?? 'zhihu'
+    if (!Object.hasOwn(platformNames, platform)) throw new Error('不支持的发布平台。')
+    assertPlatformEnabled(platform)
+    return platform
   }
 
   function articleRun(task: Task, runId?: string): SyncRun & { draftId: string } {
@@ -391,6 +400,7 @@ async function createWindow(): Promise<void> {
     if (!run?.draftId || (run.state !== 'published' && run.state !== 'publish-uncertain')) {
       throw new Error('这次同步没有可查看的文章链接。')
     }
+    assertPlatformEnabled(run.platform)
     return { ...run, draftId: run.draftId }
   }
 
@@ -409,6 +419,7 @@ async function createWindow(): Promise<void> {
   }
 
   function incompleteWeiboRuns() {
+    if (!enabledPlatforms.includes('weibo')) return []
     return tasks.list().flatMap(({ id }) => tasks.get(id).runs.flatMap((run) =>
       run.platform === 'weibo' && !run.publishedUrl && run.draftId &&
       (run.state === 'publish-uncertain' || run.state === 'published')
@@ -444,12 +455,14 @@ async function createWindow(): Promise<void> {
   }
 
   function syncJuejinAudits(list = tasks.list()): void {
-    juejinAuditMonitor.sync(list.flatMap(({ id: taskId }) => tasks.get(taskId).runs.filter(canCheckJuejinAudit)
+    const enabledTasks = enabledPlatforms.includes('juejin') ? list : []
+    juejinAuditMonitor.sync(enabledTasks.flatMap(({ id: taskId }) => tasks.get(taskId).runs.filter(canCheckJuejinAudit)
       .map(({ id: runId }) => ({ taskId, runId }))))
   }
 
   async function checkJuejinAudit({ taskId, runId }: { taskId: string; runId: string }): Promise<void> {
-    const pending = () => tasks.get(taskId).runs.filter(canCheckJuejinAudit).find((run) => run.id === runId)
+    const pending = () => enabledPlatforms.includes('juejin')
+      ? tasks.get(taskId).runs.filter(canCheckJuejinAudit).find((run) => run.id === runId) : undefined
     if (busy || window.isDestroyed()) return
     const run = pending()
     if (!run) return
@@ -493,6 +506,7 @@ async function createWindow(): Promise<void> {
   }
 
   async function refreshPublication(taskId: string, run: SyncRun & { draftId: string }, manual: boolean) {
+    assertPlatformEnabled(run.platform)
     if (run.platform === 'jianshu') {
       const result = await jianshu.publication(run.owner, jianshuDraft(run))
       if (result.url) return recordPublished(taskId, run, result.url)
@@ -532,6 +546,7 @@ async function createWindow(): Promise<void> {
 
   async function deletePublication(task: Task, runId?: string): Promise<void> {
     const local = task.runs.find((run) => run.id === runId)
+    if (local) assertPlatformEnabled(local.platform)
     if (local?.platform === 'juejin' && local.state !== 'published') {
       await tasks.clearJuejinPublicationHistory(task.id, local.id)
       notifyTasks()
@@ -799,6 +814,7 @@ async function createWindow(): Promise<void> {
   }
 
   async function juejinSettingsAccount(owner?: string) {
+    assertPlatformEnabled('juejin')
     const account = await juejin.account()
     if (!account) throw new Error('请先在应用内登录掘金。')
     if (owner !== undefined && account.id !== owner) throw new Error('掘金账号已切换，请重新打开发布默认值。')
@@ -814,12 +830,25 @@ async function createWindow(): Promise<void> {
       settingsOpen = action?.settingsOpen === true
       activeView?.setVisible(!settingsOpen)
     },
+    'relay:enabled-platforms': () => enabledPlatforms,
+    'relay:save-enabled-platforms': (action?: Action) => serial(async () => {
+      const weiboWasEnabled = enabledPlatforms.includes('weibo')
+      enabledPlatforms = await tasks.saveEnabledPlatforms(action?.enabledPlatforms)
+      if ((Object.keys(publicationViews) as Platform[]).some((platform) =>
+        publicationViews[platform] === activeView && !enabledPlatforms.includes(platform))) show()
+      syncJuejinAudits()
+      return { enabledPlatforms, resumeWeibo: !weiboWasEnabled && enabledPlatforms.includes('weibo') }
+    }).then(({ enabledPlatforms, resumeWeibo }) => {
+      if (resumeWeibo) void reconcileWeiboRuns().catch(() => {})
+      return enabledPlatforms
+    }),
     'relay:restart': () => {
       if (busy) throw new Error('请等当前操作完成。')
       app.relaunch()
       app.quit()
     },
     'relay:open-zhihu': async () => {
+      assertPlatformEnabled('zhihu')
       show(zhihuView, '知乎账号')
       const contents = zhihuView.webContents
       const current = contents.getURL()
@@ -833,6 +862,7 @@ async function createWindow(): Promise<void> {
       }
     },
     'relay:open-weibo': async () => {
+      assertPlatformEnabled('weibo')
       const alreadyOpen = activeView === weiboView && activeLabel === '微博账号'
       show(weiboView, '微博账号')
       const contents = weiboView.webContents
@@ -846,6 +876,7 @@ async function createWindow(): Promise<void> {
       }
     },
     'relay:open-juejin': async () => {
+      assertPlatformEnabled('juejin')
       const alreadyOpen = activeView === juejinView && activeLabel === '掘金账号'
       show(juejinView, '掘金账号')
       const current = juejinView.webContents.getURL()
@@ -854,6 +885,7 @@ async function createWindow(): Promise<void> {
       }
     },
     'relay:open-jianshu': async () => {
+      assertPlatformEnabled('jianshu')
       show(jianshuView, '简书账号')
       const contents = jianshuView.webContents
       const current = contents.getURL()
@@ -887,6 +919,7 @@ async function createWindow(): Promise<void> {
       const validated = await juejin.validateDefaults(defaults, account.tagLimit)
       await juejinSettingsAccount(account.id)
       await tasks.saveJuejinDefaults(account.id, validated)
+      return validated
     }),
     'relay:tasks': () => tasks.list(),
     'relay:delete-publication': (action?: Action) => serial(() => deletePublication(selectedTask(action), action?.runId)),
@@ -927,6 +960,7 @@ async function createWindow(): Promise<void> {
       if (!run || !canOpenDraft(run, task.runs)) {
         throw new Error('这次发布没有可打开的草稿。')
       }
+      assertPlatformEnabled(run.platform)
       const name = platformNames[run.platform]
       const account = await publicationSites[run.platform].account()
       if (!account || run.owner !== account.id) {
@@ -1059,7 +1093,7 @@ async function createWindow(): Promise<void> {
     'relay:publish': (action?: Action) => serial(() => publishArticle(selectedTask(action), publicationPlatform(action))),
     'relay:publish-all': (action?: Action) => serial(() => {
       const { id } = selectedTask(action)
-      return publishMissingPlatforms(() => tasks.get(id), publishArticle)
+      return publishMissingPlatforms(() => tasks.get(id), publishArticle, enabledPlatforms)
     }),
   }
 
@@ -1082,7 +1116,7 @@ async function createWindow(): Promise<void> {
         helpWindow.focus()
       } else {
         helpWindow = new BrowserWindow({
-          parent: window, width: 880, height: 760, minWidth: 480, minHeight: 400,
+          parent: window, width: 1000, height: 760, minWidth: 480, minHeight: 400,
           backgroundColor: '#f3f5f9', autoHideMenuBar: true,
           webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false },
         })

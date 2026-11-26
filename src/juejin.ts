@@ -13,7 +13,7 @@ export interface JuejinOption { id: string; name: string }
 export interface JuejinDefaults { category: JuejinOption; tags: JuejinOption[] }
 export interface JuejinPublicationStatus { id?: string; url?: string; audit?: 'reviewing' | 'rejected'; status?: string }
 
-export const juejinDefaultsRequired = '请在「发布账号 → 掘金 → 发布默认值」设置分类和标签。'
+export const juejinDefaultsRequired = '请在「系统设置 → 默认值设置」设置分类和标签。'
 
 interface Draft {
   id?: string
