@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { chromiumUserAgent, publicationUrlStatus } from './browser.js'
+import { checkDoubanAccount, Douban, doubanAccountUrl, doubanArticleUrl, doubanContentScript, doubanDraftFingerprint, doubanDraftUrl, doubanPublishedEvidenceScript, doubanPublishEndpoint } from './douban.js'
 import { Jianshu, jianshuArticleUrl, jianshuDraftUrl, jianshuHome, jianshuLoginUrl, sameJianshuRichText } from './jianshu.js'
 import { monitorJuejinAudits } from './juejin-audit.js'
 import { Juejin, juejinArticleId, juejinArticles, juejinArticleUrl, juejinDefaultsRequired, juejinDraftUrl, juejinHome, juejinId,
@@ -37,6 +38,7 @@ const workspaceAssets = new Map([
   ['/weibo.ico', 'image/vnd.microsoft.icon'],
   ['/juejin.ico', 'image/vnd.microsoft.icon'],
   ['/jianshu.ico', 'image/vnd.microsoft.icon'],
+  ['/douban.ico', 'image/vnd.microsoft.icon'],
 ])
 
 async function hasUpdate(currentVersion: string): Promise<boolean> {
@@ -167,6 +169,15 @@ async function createWindow(): Promise<void> {
     new URL(jianshuHome).origin, 'https://open.weixin.qq.com', 'https://graph.qq.com',
   ])
   const jianshu = new Jianshu((url, init) => jianshuSession.fetch(url, init))
+  const doubanSession = session.fromPartition('persist:douban')
+  const doubanView = siteView(doubanSession, [new URL(doubanAccountUrl).origin, 'https://www.douban.com'])
+  const doubanEditorView = siteView(doubanSession, ['https://www.douban.com', new URL(doubanAccountUrl).origin], false)
+  const doubanPublicSession = session.fromPartition('douban-public')
+  doubanPublicSession.setUserAgent(chromiumUserAgent(doubanPublicSession.getUserAgent()))
+  const douban = new Douban(doubanEditorView.webContents,
+    () => checkDoubanAccount(doubanSession, (options) => net.request(options)),
+    (url, init) => doubanPublicSession.fetch(url, init),
+    (url, init) => doubanSession.fetch(url, init))
   const weiboSession = session.fromPartition('persist:weibo')
   const weiboView = siteView(weiboSession, [
     'https://weibo.com', 'https://www.weibo.com', 'https://card.weibo.com',
@@ -182,11 +193,56 @@ async function createWindow(): Promise<void> {
         new URL(details.url).pathname === '/content_api/v1/article/publish') observeJuejinDispatch?.()
     callback({})
   })
-  const publicationSites = { zhihu, weibo, juejin, jianshu }
-  const publicationSessions = { zhihu: zhihuSession, weibo: weiboSession, juejin: juejinSession, jianshu: jianshuSession }
-  const publicationViews = { zhihu: zhihuView, weibo: weiboView, juejin: juejinView, jianshu: jianshuView }
+  const publicationSites = { zhihu, weibo, juejin, jianshu, douban }
+  const publicationSessions = { zhihu: zhihuSession, weibo: weiboSession, juejin: juejinSession, jianshu: jianshuSession, douban: doubanSession }
+  const publicationViews = { zhihu: zhihuView, weibo: weiboView, juejin: juejinView, jianshu: jianshuView, douban: doubanView }
   let activeView: WebContentsView | undefined
   let activeDraft: { taskId: string; runId: string } | undefined
+  let doubanManualRequest: { id: number; runId: string } | undefined
+  let doubanManualSubmission: { runId: string; completedAt: number } | undefined
+  const doubanManualLinks = new Map<string, string>()
+  const doubanPublishFilter = { urls: [doubanPublishEndpoint] }
+  doubanSession.webRequest.onBeforeRequest(doubanPublishFilter, (details, callback) => {
+    if (details.webContentsId !== doubanView.webContents.id || !activeDraft || details.method !== 'POST') {
+      callback({})
+      return
+    }
+    const { taskId, runId } = activeDraft
+    if (doubanManualRequest?.runId === runId || doubanManualSubmission?.runId === runId || doubanManualLinks.has(runId)) {
+      callback({ cancel: true })
+      return
+    }
+    doubanManualRequest = { id: details.id, runId }
+    void serial(async () => {
+      const run = tasks.get(taskId).runs.find((item) => item.id === runId)
+      if (run?.platform !== 'douban' || run.state !== 'publish-uncertain' || !run.draftId ||
+          doubanView.webContents.getURL() !== doubanDraftUrl(run.draftId)) return false
+      if (run.manualHandoff) await writeRun(taskId, { ...run, manualHandoff: false,
+        error: '正在从豆瓣编辑器提交日记，返回工作区可核对结果。' })
+      return true
+    }).then((allowed) => {
+      if (!allowed) doubanManualRequest = undefined
+      callback({ cancel: !allowed })
+    }, () => {
+      doubanManualRequest = undefined
+      callback({ cancel: true })
+    })
+  })
+  doubanSession.webRequest.onCompleted(doubanPublishFilter, (details) => {
+    if (details.id !== doubanManualRequest?.id) return
+    if (details.statusCode >= 200 && details.statusCode < 300) {
+      doubanManualSubmission = { runId: doubanManualRequest.runId, completedAt: Date.now() }
+      doubanManualRequest = undefined
+    } else if ([400, 401, 403, 413, 415, 422, 429].includes(details.statusCode)) {
+      doubanManualRequest = undefined
+    }
+  })
+  doubanView.webContents.on('did-navigate', (_event, address) => {
+    const submitted = doubanManualSubmission
+    doubanManualSubmission = undefined
+    const url = doubanArticleUrl(address)
+    if (submitted && url && Date.now() - submitted.completedAt < 15_000) doubanManualLinks.set(submitted.runId, url)
+  })
   let zhihuDraftCheckView: WebContentsView | undefined
   let settingsOpen = false
   let activeLabel = ''
@@ -507,6 +563,23 @@ async function createWindow(): Promise<void> {
 
   async function refreshPublication(taskId: string, run: SyncRun & { draftId: string }, manual: boolean) {
     assertPlatformEnabled(run.platform)
+    if (run.platform === 'douban') {
+      const url = doubanArticleUrl(run.doubanCandidateUrl ?? doubanManualLinks.get(run.id))
+      if (url && await douban.publicArticle(url, run.owner)) {
+        doubanManualLinks.delete(run.id)
+        return recordPublished(taskId, { ...run, doubanAudit: undefined, doubanCandidateUrl: undefined }, url)
+      }
+      if (!url) return { checkNotice: '豆瓣尚未返回可关联到这份草稿的日记链接，请在「我的豆瓣」核对。' }
+      const audit = await douban.publicationAudit(url, run.owner) ?? run.doubanAudit
+      const notice = audit === 'reviewing' ? '豆瓣已接收日记，正在审核。' :
+        audit === 'rejected' ? '豆瓣日记审核未通过，可在豆瓣查看。' :
+          '豆瓣已返回日记链接，暂未确认公开。'
+      if (audit !== run.doubanAudit || url !== run.doubanCandidateUrl || notice !== run.error) {
+        await writeRun(taskId, { ...run, doubanAudit: audit, doubanCandidateUrl: url, error: notice })
+        doubanManualLinks.delete(run.id)
+      }
+      return { checkNotice: notice, reviewing: audit === 'reviewing' }
+    }
     if (run.platform === 'jianshu') {
       const result = await jianshu.publication(run.owner, jianshuDraft(run))
       if (result.url) return recordPublished(taskId, run, result.url)
@@ -562,6 +635,7 @@ async function createWindow(): Promise<void> {
     progress(task.id, `正在核对${name}线上文章…`)
     await requireOwner()
     let url: string | undefined
+    if (run.platform === 'douban') url = doubanArticleUrl(run.publishedUrl)
     if (run.platform === 'jianshu') url = jianshuArticleUrl(run.publishedUrl ?? '')
     if (run.platform === 'weibo') url = weiboArticleUrl(run.publishedUrl ?? '') || (await checkWeiboHistory(run))?.url
     if (run.platform === 'zhihu') url = articleUrl(run.draftId)
@@ -579,6 +653,7 @@ async function createWindow(): Promise<void> {
         ? await checkWeiboArticle(weiboView.webContents, url, run.articleTitle ?? '', run.owner)
         : run.platform === 'juejin'
           ? await juejin.publicArticle(juejinArticleId(url)!, run.draftId).catch(() => false)
+          : run.platform === 'douban' ? await douban.publicArticle(url, run.owner)
           : run.platform === 'jianshu'
             ? (await jianshu.publication(run.owner, jianshuDraft(run)).catch(() => undefined))?.url === url
             : await checkZhihuArticle(zhihuView.webContents, run.draftId)
@@ -655,8 +730,37 @@ async function createWindow(): Promise<void> {
     return { saved, publishNotice: notice, reviewing: checked.audit === 'reviewing' }
   }
 
+  async function publishSavedDouban(taskId: string, run: SyncRun & { draftId: string }) {
+    const draft = await douban.draft(run.owner, run.draftId)
+    if (!draft || doubanDraftFingerprint(draft) !== run.doubanFingerprint) {
+      const notice = '豆瓣草稿已失效或内容有变化。点击「重试发布」可重新同步本地文章。'
+      await writeRun(taskId, { ...run, draftMissing: !draft, state: 'failed', finishedAt: new Date().toISOString(), error: notice })
+      return { publishNotice: notice }
+    }
+    await writeRun(taskId, { ...run, state: 'publishing', finishedAt: undefined, error: undefined })
+    progress(taskId, '正在提交豆瓣日记…')
+    show()
+    const result = await douban.publish(run.owner, draft).catch(() => undefined)
+    if (result?.url) {
+      run = { ...run, doubanCandidateUrl: result.url, doubanAudit: result.audit,
+        state: 'publish-uncertain', finishedAt: new Date().toISOString(), error: '豆瓣已返回日记链接，正在核对公开状态。' }
+      await writeRun(taskId, run)
+      const checked = await refreshPublication(taskId, run, false)
+      if ('published' in checked) return checked
+      return { publishNotice: checked.checkNotice, reviewing: 'reviewing' in checked && checked.reviewing }
+    }
+    const saved = result?.saved === true
+    const notice = saved ? '豆瓣要求在编辑器中处理后提交。草稿已保留，可以打开草稿。' :
+      '豆瓣发布结果尚未确认，请到「我的豆瓣」核对日记。'
+    await writeRun(taskId, {
+      ...run, state: saved ? 'saved' : 'publish-uncertain', finishedAt: new Date().toISOString(), error: notice,
+    })
+    return { saved, publishNotice: notice }
+  }
+
   async function publishSaved(taskId: string, run: SyncRun & { draftId: string }, defaults?: JuejinDefaults) {
     assertCanPublish(tasks.get(taskId), run.platform)
+    if (run.platform === 'douban') return publishSavedDouban(taskId, run)
     await writeRun(taskId, { ...run, state: 'publishing', finishedAt: undefined, error: undefined })
     const name = platformNames[run.platform]
     progress(taskId, `正在提交${name}文章…`)
@@ -771,7 +875,13 @@ async function createWindow(): Promise<void> {
         await writeRun(task.id, run, missingId)
         if (missingId) progress(task.id, `原草稿已失效，正在新建${name}草稿…`)
       }
-      if (platform === 'jianshu') {
+      if (platform === 'douban') {
+        progress(task.id, '正在同步豆瓣日记草稿…')
+        const draft = await douban.saveDraft(account.id, article, existing, saveProgress, readImage, uploading,
+          (html, images) => window.webContents.executeJavaScript(doubanContentScript(html, images)))
+        draftId = draft.id
+        run = { ...run, doubanFingerprint: draft.fingerprint }
+      } else if (platform === 'jianshu') {
         progress(task.id, '正在同步简书草稿…')
         const draft = await jianshu.saveDraft(account.id, article, existing ? jianshuDraft({ ...run, draftId: existing }) : undefined,
           async ({ id, notebookId }) => {
@@ -898,7 +1008,18 @@ async function createWindow(): Promise<void> {
         }
       }
     },
+    'relay:open-douban': async () => {
+      show(doubanView, '豆瓣账号')
+      try {
+        await doubanView.webContents.loadURL(doubanAccountUrl)
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ERR_ABORTED') throw error
+      }
+    },
     'relay:account': async (action?: Action) => {
+      if (action?.platform === 'douban') {
+        return { signedIn: await checkDoubanAccount(doubanSession, (options) => net.request(options)) }
+      }
       const adapter = publicationSites[publicationPlatform(action)]
       return { name: (await adapter.account())?.name ?? null }
     },
@@ -966,6 +1087,19 @@ async function createWindow(): Promise<void> {
       if (!account || run.owner !== account.id) {
         throw new Error(`请先登录保存这份草稿的${name}账号。`)
       }
+      if (run.platform === 'douban') {
+        if (run.doubanCandidateUrl || doubanManualLinks.has(run.id)) throw new Error('豆瓣已返回日记链接，请先刷新状态。')
+        if (!await douban.draft(run.owner, run.draftId)) throw new Error('这份豆瓣草稿已经失效。')
+        await doubanView.webContents.loadURL(doubanDraftUrl(run.draftId))
+        if (run.state === 'saved') {
+          await writeRun(task.id, {
+            ...run, state: 'publish-uncertain', manualHandoff: true,
+            error: '已打开豆瓣草稿。提交后请返回工作区核对发布结果。',
+          })
+        }
+        show(doubanView, '豆瓣日记草稿编辑器', { taskId: task.id, runId: run.id })
+        return
+      }
       if (run.platform === 'jianshu') {
         const draft = jianshuDraft(run)
         const result = await jianshu.publication(run.owner, draft).catch(() => undefined)
@@ -1027,7 +1161,8 @@ async function createWindow(): Promise<void> {
         return { articleOpened: true }
       }
       const url = run.platform === 'weibo' ? weiboArticleUrl(run.publishedUrl ?? '') :
-        run.platform === 'jianshu' ? jianshuArticleUrl(run.publishedUrl ?? '') : articleUrl(run.draftId)
+        run.platform === 'jianshu' ? jianshuArticleUrl(run.publishedUrl ?? '') :
+        run.platform === 'douban' ? doubanArticleUrl(run.publishedUrl) : articleUrl(run.draftId)
       if (!url) throw new Error('这次同步没有可查看的文章链接。')
       try {
         await shell.openExternal(url)
@@ -1035,6 +1170,13 @@ async function createWindow(): Promise<void> {
         throw new Error('无法打开系统浏览器。你可以复制同步记录中的文章链接后访问。')
       }
       return { articleOpened: true, needsConfirmation: run.state === 'publish-uncertain' }
+    }),
+    'relay:open-douban-result': (action?: Action) => serial(async () => {
+      const run = articleRun(selectedTask(action), action?.runId)
+      if (run.platform !== 'douban') throw new Error('这次同步没有可打开的豆瓣页面。')
+      const url = doubanArticleUrl(run.publishedUrl ?? run.doubanCandidateUrl)
+      await doubanView.webContents.loadURL(url ?? 'https://www.douban.com/mine/')
+      show(doubanView, url ? '豆瓣日记' : '我的豆瓣')
     }),
     'relay:open-weibo-result': (action?: Action) => serial(async () => {
       const run = articleRun(selectedTask(action), action?.runId)
@@ -1064,6 +1206,16 @@ async function createWindow(): Promise<void> {
     'relay:mark-published': (action?: Action) => serial(async () => {
       const task = selectedTask(action)
       const run = articleRun(task, action?.runId)
+      if (run.platform === 'douban') {
+        if (run.state === 'published') return { publishedUrl: run.publishedUrl }
+        if (run.doubanCandidateUrl || doubanManualLinks.has(run.id)) return refreshPublication(task.id, run, true)
+        const url = doubanArticleUrl(action?.url)
+        if (!url || !run.doubanFingerprint || !await douban.publicArticle(url, run.owner, {
+          fingerprint: run.doubanFingerprint, startedAt: run.startedAt,
+          evidence: (html) => window.webContents.executeJavaScript(doubanPublishedEvidenceScript(html)),
+        })) throw new Error('暂未核实该公开日记与草稿的账号、正文和图片一致，请检查链接。')
+        return recordPublished(task.id, run, url)
+      }
       if (run.platform === 'jianshu') {
         return run.state === 'published' ? { publishedUrl: run.publishedUrl } : refreshPublication(task.id, run, true)
       }
@@ -1134,7 +1286,7 @@ async function createWindow(): Promise<void> {
     juejinSession.webRequest.onBeforeRequest(null)
     for (const channel of Object.keys(handlers)) ipcMain.removeHandler(channel)
     zhihuDraftCheckView?.webContents.close()
-    for (const view of [sourceView, zhihuView, weiboView, juejinView, jianshuView]) view.webContents.close()
+    for (const view of [sourceView, zhihuView, weiboView, juejinView, jianshuView, doubanView, doubanEditorView]) view.webContents.close()
   })
   await window.loadURL(workspaceUrl)
   const initialized = await window.webContents.executeJavaScript(`

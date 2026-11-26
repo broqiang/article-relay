@@ -16,6 +16,7 @@ contextBridge.exposeInMainWorld('relay', {
   openWeibo: () => ipcRenderer.invoke('relay:open-weibo'),
   openJuejin: () => ipcRenderer.invoke('relay:open-juejin'),
   openJianshu: () => ipcRenderer.invoke('relay:open-jianshu'),
+  openDouban: () => ipcRenderer.invoke('relay:open-douban'),
   getJuejinDefaults: () => ipcRenderer.invoke('relay:juejin-defaults'),
   searchJuejinTags: (owner: string, query: string) => ipcRenderer.invoke('relay:juejin-tags', { owner, query }),
   saveJuejinDefaults: (owner: string, defaults: JuejinDefaults) => ipcRenderer.invoke('relay:save-juejin-defaults', { owner, defaults }),
@@ -35,6 +36,7 @@ contextBridge.exposeInMainWorld('relay', {
   publishAll: (taskId: string) => ipcRenderer.invoke('relay:publish-all', { taskId }),
   showArticle: (taskId: string, runId: string) => ipcRenderer.invoke('relay:show-article', { taskId, runId }),
   openZhihuArticle: (taskId: string, runId: string) => ipcRenderer.invoke('relay:show-article', { taskId, runId, openOnly: true }),
+  openDoubanResult: (taskId: string, runId: string) => ipcRenderer.invoke('relay:open-douban-result', { taskId, runId }),
   openWeiboResult: (taskId: string, runId: string) => ipcRenderer.invoke('relay:open-weibo-result', { taskId, runId }),
   openJuejinResult: (taskId: string, runId: string) => ipcRenderer.invoke('relay:open-juejin-result', { taskId, runId }),
   markPublished: (taskId: string, runId: string, url?: string) =>

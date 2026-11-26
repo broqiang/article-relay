@@ -5,10 +5,14 @@ const platforms = {
   weibo: { name: '微博', icon: 'weibo.ico', open: () => relay.openWeibo() },
   juejin: { name: '掘金', icon: 'juejin.ico', open: () => relay.openJuejin() },
   jianshu: { name: '简书', icon: 'jianshu.ico', open: () => relay.openJianshu() },
+  douban: { name: '豆瓣', icon: 'douban.ico', open: () => relay.openDouban() },
 }
 const platformEntries = Object.entries(platforms)
+const accountEntries = platformEntries
 let enabledPlatforms = []
 const enabledEntries = () => platformEntries.filter(([id]) => enabledPlatforms.includes(id))
+const hasAccount = (id) => id === 'douban' || enabledPlatforms.includes(id)
+const availableAccounts = () => accountEntries.filter(([id]) => hasAccount(id))
 const importLabels = {
   pending: '待导入', reading: '读取中', paused: '待继续', downloading: '下载图片中', ready: '已导入', failed: '导入失败',
 }
@@ -16,10 +20,10 @@ const runLabels = {
   running: '准备发布中', saved: '平台草稿已保存', failed: '发布失败',
   publishing: '发布中', published: '已发布', 'publish-uncertain': '发布结果待核对',
 }
-const juejinAuditLabels = { reviewing: '已提交 · 审核中', rejected: '审核未通过' }
+const auditLabels = { reviewing: '已提交 · 审核中', rejected: '审核未通过' }
 const accountLabels = { checking: '正在检查登录状态…', signedIn: '已登录', signedOut: '未登录', unknown: '登录状态待确认' }
 const dateFormat = new Intl.DateTimeFormat('zh-CN', { dateStyle: 'short', timeStyle: 'short' })
-const accounts = Object.fromEntries(platformEntries.map(([id]) => [id, { state: 'checking' }]))
+const accounts = Object.fromEntries(accountEntries.map(([id]) => [id, { state: 'checking' }]))
 let tasks = []
 let selectedId
 let busy = false
@@ -112,12 +116,16 @@ function platformRun(runs) {
     runs.find((run) => ['publishing', 'publish-uncertain'].includes(run.state)) ?? runs[0]
 }
 
+function runAudit(run) {
+  return run?.juejinAudit ?? run?.doubanAudit
+}
+
 function runLabel(run) {
-  return juejinAuditLabels[run.juejinAudit] || runLabels[run.state]
+  return auditLabels[runAudit(run)] || runLabels[run.state]
 }
 
 function runClass(run) {
-  return `run-state ${run.juejinAudit || run.state}`
+  return `run-state ${runAudit(run) || run.state}`
 }
 
 function taskStatus(task) {
@@ -126,18 +134,18 @@ function taskStatus(task) {
   }
   const current = enabledPlatforms.map((id) => platformRun(task.runs.filter((run) => run.platform === id)))
   const published = current.filter((run) => run?.state === 'published').length
-  const checking = current.filter((run) => run?.state === 'publish-uncertain' && !run.juejinAudit).length
-  const audit = current.find((run) => run?.juejinAudit)?.juejinAudit
+  const checking = current.filter((run) => run?.state === 'publish-uncertain' && !runAudit(run)).length
+  const audited = current.filter(runAudit)
   const working = current.some((run) => ['running', 'publishing'].includes(run?.state))
   const failures = current.filter((run) => run?.state === 'failed').length
   const parts = [
     published && `已发布 ${published} 个平台`,
     checking && `${checking} 个平台待核对`,
-    audit && `掘金${audit === 'reviewing' ? '审核中' : '审核未通过'}`,
+    ...audited.map((run) => `${platforms[run.platform].name}${runAudit(run) === 'reviewing' ? '审核中' : '审核未通过'}`),
     working && '发布中',
     failures && `${failures} 个平台发布失败`,
   ].filter(Boolean)
-  const status = failures || audit === 'rejected' ? 'failed' :
+  const status = failures || audited.some((run) => runAudit(run) === 'rejected') ? 'failed' :
     published > 0 && published === enabledPlatforms.length ? 'published' : 'in-progress'
   return element('span', parts.join(' · ') || '待发布', `task-status ${status}`)
 }
@@ -148,7 +156,7 @@ function renderControls(task) {
   })
   byId('open-system-settings').disabled = busy || !enabledPlatforms.length
   byId('edit-platform-settings').disabled = busy || !enabledPlatforms.length
-  byId('check-all-accounts').disabled = busy || !enabledPlatforms.length
+  byId('check-all-accounts').disabled = busy
   renderJuejinDefaultsCard()
   const ready = task?.importState === 'ready'
   const canPublish = ready && enabledPlatforms.some((id) => {
@@ -186,13 +194,14 @@ function renderPlatformSettingsSummary() {
 }
 
 function renderAccounts() {
-  const states = enabledPlatforms.map((id) => accounts[id])
+  const entries = availableAccounts()
+  const states = entries.map(([id]) => accounts[id])
   const signedIn = states.filter(({ state }) => state === 'signedIn').length
   const checking = states.some(({ state }) => state === 'checking')
   const unknown = states.filter(({ state }) => state === 'unknown').length
   byId('account-summary').textContent = `${states.length} 个平台可登录 · 已登录 ${signedIn} 个` +
     (checking ? ' · 检测中' : unknown ? ` · ${unknown} 个待确认` : '')
-  const rows = enabledEntries().map(([id, platform]) => {
+  const rows = entries.map(([id, platform]) => {
     const row = element('div', '', 'account-row')
     const identity = element('div', '', 'platform-identity')
     const account = accounts[id]
@@ -247,6 +256,24 @@ function publicationActions(task, id, run, canClearLocalHistory = false, current
         await showPublishResult(await relay.markPublished(task.id, run.id), run.platform)
       }
     })))
+  }
+  if (run?.state === 'publish-uncertain' && run.platform === 'douban' && run.draftId && !run.doubanCandidateUrl) {
+    const verify = element('form', '', 'platform-actions')
+    const input = element('input')
+    input.type = 'url'
+    input.required = true
+    input.placeholder = '公开的豆瓣日记链接'
+    input.setAttribute('aria-label', input.placeholder)
+    const submit = element('button', '核对链接', 'quiet')
+    submit.prepend(buttonIcon('check'))
+    submit.disabled = busy
+    submit.type = 'submit'
+    verify.append(input, submit)
+    verify.addEventListener('submit', (event) => {
+      event.preventDefault()
+      void runAction(async () => showPublishResult(await relay.markPublished(task.id, run.id, input.value), id))
+    })
+    actions.append(verify)
   }
   if (canClearLocalHistory) {
     actions.append(deletePublicationButton(() => void runAction(async () => {
@@ -307,7 +334,7 @@ function publicationLinks(task, id, run) {
   const open = async () => {
     if (id === 'zhihu') {
       await showPublishResult(await relay.openZhihuArticle(task.id, run.id), id)
-    } else if (id === 'jianshu') {
+    } else if (id === 'jianshu' || id === 'douban') {
       await showPublishResult(await relay.showArticle(task.id, run.id), id)
     } else {
       await (id === 'weibo' ? relay.openWeiboResult(task.id, run.id) : relay.openJuejinResult(task.id, run.id))
@@ -318,7 +345,14 @@ function publicationLinks(task, id, run) {
     const preview = `https://juejin.cn/spost/${run.articleId}`
     line('审核链接', platformLink(preview, preview, open))
   }
-  line('文章链接', url ? platformLink(url, url, open) : published ? '待匹配' : pending && !run.juejinAudit ? '待核对' : '未发布')
+  line('文章链接', url ? platformLink(url, url, open) : published ? '待匹配' : pending ? '待核对' : '未发布')
+  if (id === 'douban' && pending && run.doubanCandidateUrl) {
+    line('核对链接', platformLink(run.doubanCandidateUrl, run.doubanCandidateUrl,
+      () => relay.openDoubanResult(task.id, run.id)))
+  }
+  if (id === 'douban' && pending && !run.doubanCandidateUrl) {
+    links.append(button('document', '打开我的豆瓣', 'quiet', () => void runAction(() => relay.openDoubanResult(task.id, run.id))))
+  }
   if (pending && zhihuUrl) line('核对链接', platformLink(zhihuUrl, zhihuUrl, open))
   if (id === 'weibo' && !url && run?.draftId && (pending || published)) {
     const editor = 'https://card.weibo.com/article/v5/editor'
@@ -372,7 +406,7 @@ function renderPlatforms(task) {
     details.append(header, publicationLinks(task, id, current))
 
     if (current?.error && state !== 'published') details.append(element('p', current.error,
-      `platform-note ${current.juejinAudit === 'reviewing' ? 'muted' : 'run-error'}`))
+      `platform-note ${runAudit(current) === 'reviewing' ? 'muted' : 'run-error'}`))
     if (id === 'juejin' && state === 'publish-uncertain' && current.draftId && !current.draftMissing) {
       if (current.juejinAudit !== 'rejected') {
         details.append(element('p', current.juejinAutoCheckStopped ? '手动核对后已停止自动核对，可继续刷新状态。' :
@@ -486,11 +520,11 @@ async function checkAccount(id) {
     const status = await relay.checkAccount(id)
     if (id === 'weibo' && confirmation !== confirmedWeiboAccount) return Boolean(confirmedWeiboAccount.name)
     const signedIn = status.signedIn ?? Boolean(status.name)
-    if (enabledPlatforms.includes(id) && accounts[id] === previous) setAccount(id, signedIn ? 'signedIn' : 'signedOut', status.name)
+    if (hasAccount(id) && accounts[id] === previous) setAccount(id, signedIn ? 'signedIn' : 'signedOut', status.name)
     return signedIn
   } catch (error) {
     if (id === 'weibo' && confirmation !== confirmedWeiboAccount) return Boolean(confirmedWeiboAccount.name)
-    if (enabledPlatforms.includes(id) && accounts[id] === previous) setAccount(id, 'unknown')
+    if (hasAccount(id) && accounts[id] === previous) setAccount(id, 'unknown')
     throw error
   }
 }
@@ -669,11 +703,12 @@ byId('open-accounts').addEventListener('click', () => void runAction(async () =>
   await relay.hideBrowser()
 }))
 byId('check-all-accounts').addEventListener('click', () => void runAction(async () => {
-  message('正在检查所有已启用平台的登录状态…')
-  for (const id of enabledPlatforms) accounts[id] = { ...accounts[id], state: 'checking' }
+  message('正在检查列表中的平台登录状态…')
+  const ids = availableAccounts().map(([id]) => id)
+  for (const id of ids) accounts[id] = { ...accounts[id], state: 'checking' }
   renderAccounts()
   renderControls(selectedTask())
-  const results = await Promise.allSettled(enabledPlatforms.map(checkAccount))
+  const results = await Promise.allSettled(ids.map(checkAccount))
   const signedIn = results.filter((result) => result.status === 'fulfilled' && result.value).length
   const signedOut = results.filter((result) => result.status === 'fulfilled' && !result.value).length
   const unknown = results.length - signedIn - signedOut
@@ -718,7 +753,7 @@ byId('back').addEventListener('click', () => void runAction(async () => {
     else screen = 'article'
     return
   }
-  const loginPlatform = enabledEntries().find(([, platform]) => browserLabel === `${platform.name}账号`)?.[0]
+  const loginPlatform = availableAccounts().find(([, platform]) => browserLabel === `${platform.name}账号`)?.[0]
   await relay.hideBrowser(true)
   if (loginPlatform) void checkAccount(loginPlatform).catch(() => {})
 }))
@@ -915,7 +950,7 @@ if (relay) {
     const [configuredPlatforms, items] = await Promise.all([relay.getEnabledPlatforms(), relay.listTasks()])
     enabledPlatforms = configuredPlatforms
     updateTasks(items)
-    for (const id of enabledPlatforms) void checkAccount(id).catch(() => {})
+    for (const [id] of availableAccounts()) void checkAccount(id).catch(() => {})
   })
   void relay.getVersion().then((version) => {
     byId('app-version').textContent = `v${version}`
@@ -926,7 +961,7 @@ if (relay) {
   }).catch(() => {})
 } else {
   busy = true
-  for (const [id] of platformEntries) accounts[id] = { state: 'unknown' }
+  for (const [id] of accountEntries) accounts[id] = { state: 'unknown' }
   message('应用连接未能启动，请关闭并重新打开应用。', true)
   render()
 }

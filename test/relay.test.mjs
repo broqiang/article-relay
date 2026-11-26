@@ -13,6 +13,7 @@ import { checkZhihuArticle, publishZhihuDraft } from '../dist/zhihu-publish.js'
 import { Weibo, findWeiboPublishedUrl, isWeiboSsoCallback, weiboArticleUrl, weiboDraftUrl, weiboEditor, weiboHistoryUrl } from '../dist/weibo.js'
 import { checkWeiboArticle, publishWeiboDraft } from '../dist/weibo-publish.js'
 import { chromiumUserAgent, publicationUrlStatus } from '../dist/browser.js'
+import { checkDoubanAccount, Douban, doubanAccountUrl, doubanArticleUrl, doubanDraftFingerprint, doubanDraftUrl } from '../dist/douban.js'
 import { checkJianshuAccount, Jianshu, jianshuArticleUrl, jianshuDraftUrl, jianshuHome } from '../dist/jianshu.js'
 import { blockingPublication, canCheckJuejinAudit, canOpenDraft, clearPublishedRun, publishMissingPlatforms, TaskStore, taskSummary } from '../dist/tasks.js'
 import { Juejin, juejinArticleId, juejinDraftUrl, parseJuejinDefaults } from '../dist/juejin.js'
@@ -55,17 +56,24 @@ test('initializes the bridge without CommonJS exports in a sandboxed preload', a
   assert.equal(await bridge.openWeibo(), 'relay:open-weibo')
   assert.equal(await bridge.openJuejin(), 'relay:open-juejin')
   assert.equal(await bridge.openJianshu(), 'relay:open-jianshu')
+  assert.equal(await bridge.openDouban(), 'relay:open-douban')
   assert.equal(await bridge.getJuejinDefaults(), 'relay:juejin-defaults')
   assert.equal(JSON.stringify(await bridge.searchJuejinTags('123', 'JavaScript')),
     '{"channel":"relay:juejin-tags","args":{"owner":"123","query":"JavaScript"}}')
   assert.equal(await bridge.checkAccount(), 'relay:account')
   assert.equal(JSON.stringify(await bridge.checkAccount('jianshu')),
     '{"channel":"relay:account","args":{"platform":"jianshu"}}')
+  assert.equal(JSON.stringify(await bridge.checkAccount('douban')),
+    '{"channel":"relay:account","args":{"platform":"douban"}}')
   assert.equal(JSON.stringify(await bridge.deleteTask('task')), '{"channel":"relay:delete-task","args":{"taskId":"task"}}')
   assert.equal(JSON.stringify(await bridge.deletePublication('task', 'run')), '{"channel":"relay:delete-publication","args":{"taskId":"task","runId":"run"}}')
   assert.equal(JSON.stringify(await bridge.publishAll('task')), '{"channel":"relay:publish-all","args":{"taskId":"task"}}')
   assert.equal(JSON.stringify(await bridge.publishArticle('task')), '{"channel":"relay:publish","args":{"taskId":"task"}}')
   assert.equal(JSON.stringify(await bridge.publishArticle('task', 'weibo')), '{"channel":"relay:publish","args":{"taskId":"task","platform":"weibo"}}')
+  assert.equal(JSON.stringify(await bridge.publishArticle('task', 'douban')),
+    '{"channel":"relay:publish","args":{"taskId":"task","platform":"douban"}}')
+  assert.equal(JSON.stringify(await bridge.openDoubanResult('task', 'run')),
+    '{"channel":"relay:open-douban-result","args":{"taskId":"task","runId":"run"}}')
   assert.equal(JSON.stringify(await bridge.showDraft('task', 'run')), '{"channel":"relay:show-draft","args":{"taskId":"task","runId":"run"}}')
   assert.equal(JSON.stringify(await bridge.hideBrowser(true)),
     '{"channel":"relay:hide-browser","args":{"returnFromDraft":true}}')
@@ -81,6 +89,135 @@ test('initializes the bridge without CommonJS exports in a sandboxed preload', a
   weiboAccountChanged({ sender: 'internal event' }, '微博账号')
   weiboAccountChanged({ sender: 'internal event' }, null)
   assert.deepEqual(accounts, ['微博账号', null])
+})
+
+test('checks the protected Douban account page and distinguishes login redirects from errors', async () => {
+  const session = {}
+  const check = (event, ...args) => checkDoubanAccount(session, (options) => {
+    assert.deepEqual(options, {
+      url: doubanAccountUrl, session, cache: 'no-store', credentials: 'include', redirect: 'manual',
+    })
+    const probe = new EventEmitter()
+    probe.end = () => {
+      probe.emit(event, ...args)
+      probe.emit('close')
+    }
+    probe.abort = () => probe.emit('close')
+    return probe
+  })
+  const html = { 'content-type': 'text/html; charset=utf-8' }
+  assert.equal(await check('response', { statusCode: 200, headers: html }), true)
+  for (const path of ['/accounts/login', '/passport/login']) {
+    assert.equal(await check('redirect', 302, 'GET', new URL(path, doubanAccountUrl).href), false)
+  }
+  for (const url of ['https://accounts.douban.com/passport/verify', 'https://example.org/passport/login']) {
+    await assert.rejects(check('redirect', 302, 'GET', url), /暂时无法确认豆瓣登录状态/)
+  }
+  await assert.rejects(check('response', { statusCode: 403, headers: html }), /暂时无法确认豆瓣登录状态/)
+  await assert.rejects(check('error', new Error('offline')), /offline/)
+})
+
+test('saves and reuses a Douban diary draft and rejects incomplete body or image writes', async () => {
+  const account = { id: 37, name: '测试账号' }
+  let stored
+  let failedUpload = false
+  let changedBody = false
+  const requests = []
+  const checkpoints = []
+  const editor = {
+    async loadURL(url) { assert.equal(url, 'https://www.douban.com/topic/create?subtype=note') },
+    executeJavaScript(script) {
+      return runInNewContext(script, {
+        location: { href: 'https://www.douban.com/topic/create?subtype=note' },
+        window: { __INIT_STATE__: { user: account, upload_auth_token: 'upload' } },
+        document: { cookie: 'ck=test' }, URL, URLSearchParams, AbortSignal, FormData, Blob, Uint8Array, atob,
+        fetch: async (url, options) => {
+          const { pathname } = new URL(url)
+          requests.push([options.method ?? 'GET', pathname])
+          assert.equal(options.credentials, 'include')
+          if (pathname.endsWith('/add_photo')) {
+            assert.equal(options.body.get('image_file').type, 'image/png')
+            return Response.json({ r: failedUpload ? 1 : 0, photo: { id: 890, url: 'https://img1.doubanio.com/p890.png' } })
+          }
+          if (options.method === 'POST') {
+            assert.equal(options.headers['X-CSRF-TOKEN'], 'test')
+            const props = JSON.parse(JSON.parse(options.body).draft_props)
+            if (changedBody) props.content.blocks[0].text = '被截断'
+            stored = { id: 78, user_id: 37, draft_props: props }
+            return Response.json(stored)
+          }
+          return Response.json(stored)
+        },
+      })
+    },
+  }
+  const douban = new Douban(editor, async () => true, () => assert.fail('unexpected public request'))
+  assert.deepEqual(await douban.account(), { id: '37', name: '测试账号' })
+  const article = { title: '文章标题', html: 'raw', images: ['local'] }
+  const convert = (_html, [photo]) => ({
+    blocks: [
+      { type: 'unstyled', text: '第一段', entityRanges: [] },
+      { type: 'atomic', text: ' ', entityRanges: [{ key: 0 }] },
+    ],
+    entityMap: { 0: { type: 'IMAGE', data: photo } },
+  })
+  const save = (id) => douban.saveDraft('37', article, id, async (draftId) => { checkpoints.push(draftId) },
+    async () => new Blob(['png'], { type: 'image/png' }), () => {}, convert)
+  const first = await save()
+  const next = await save(first.id)
+  assert.equal(first.id, '78')
+  assert.equal(first.fingerprint, next.fingerprint)
+  assert.deepEqual(checkpoints, ['78', '78'])
+  assert.deepEqual(requests.filter(([method, path]) => method === 'POST' && path.includes('/dwarf')), [
+    ['POST', '/rexxar/api/v2/dwarf/drafts'], ['POST', '/rexxar/api/v2/dwarf/78'],
+  ])
+  assert.match(doubanDraftUrl(first.id), /subtype=note&draft_id=78$/)
+  await assert.rejects(douban.draft('99', first.id), /豆瓣账号/)
+  changedBody = true
+  await assert.rejects(save(first.id), /标题、正文或图片/)
+  assert.equal(checkpoints.at(-1), '78')
+  const writes = checkpoints.length
+  failedUpload = true
+  await assert.rejects(save(first.id), /未确认第 1 张图片/)
+  assert.equal(checkpoints.length, writes)
+})
+
+test('matches the Douban submission to an anonymous public diary and propagates interruption', async () => {
+  const owner = '37'
+  const draft = { title: '标题', content: { blocks: [{ type: 'unstyled', text: '正文', entityRanges: [] }], entityMap: {} },
+    image_ids: [], subtype: 'note' }
+  const published = { id: '812', url: 'https://www.douban.com/topic/812/?track=1',
+    subtype: 'note', author: { id: owner }, is_private: false, content: '<p>正文</p>',
+    title: draft.title, create_time: '2026-11-26 19:02:01' }
+  let reply = { status: 200, data: published }
+  const douban = new Douban({ executeJavaScript: async () => {
+    if (reply instanceof Error) throw reply
+    return reply
+  } }, async () => true, async (url, init) => {
+    assert.equal(url, 'https://m.douban.com/rexxar/api/v2/group/topic/812')
+    assert.equal(init.credentials, 'omit')
+    return Response.json(published)
+  })
+  const url = 'https://www.douban.com/topic/812/'
+  assert.equal(doubanArticleUrl(published.url), url)
+  assert.equal(doubanArticleUrl('https://other.example/topic/812/'), undefined)
+  assert.deepEqual(await douban.publish(owner, draft), { url })
+  reply = { status: 200, data: { ...published, label: '内容审核中' } }
+  assert.deepEqual(await douban.publish(owner, draft), { url, audit: 'reviewing' })
+  assert.equal(await douban.publicArticle(url, owner, {
+    startedAt: '2026-11-26T11:02:00Z', fingerprint: doubanDraftFingerprint(draft),
+    evidence: async () => JSON.stringify(['正文']),
+  }), true)
+  assert.equal(await douban.publicArticle(url, '99'), false)
+  published.is_private = true
+  assert.equal(await douban.publicArticle(url, owner), false)
+  reply = { status: 403, data: { code: 1078, localized_message: '需要验证' } }
+  assert.deepEqual(await douban.publish(owner, draft), { saved: true })
+  reply = new Error('connection reset')
+  await assert.rejects(douban.publish(owner, draft), /connection reset/)
+  const run = { platform: 'douban', draftId: '78', state: 'publish-uncertain', doubanCandidateUrl: url, manualHandoff: true }
+  assert.equal(blockingPublication([run], 'douban'), run)
+  assert.equal(canOpenDraft(run, [run]), false)
 })
 
 test('reads Jianshu account state without treating invalid pages as signed out', async () => {
@@ -243,8 +380,8 @@ test('publishes only eligible platforms, keeps going after failures, and include
   const states = (outcomes) => outcomes.map(({ state }) => state)
 
   assert.equal(blockingPublication(task.runs, 'weibo'), published)
-  assert.deepEqual(states(await batch(() => ({ loginRequired: true }))), ['login-required', 'already-published', 'login-required', 'login-required'])
-  assert.deepEqual(attempts, ['zhihu', 'juejin', 'jianshu'])
+  assert.deepEqual(states(await batch(() => ({ loginRequired: true }))), ['login-required', 'already-published', 'login-required', 'login-required', 'login-required'])
+  assert.deepEqual(attempts, ['zhihu', 'juejin', 'jianshu', 'douban'])
 
   task.runs = clearPublishedRun(task.runs, published)
   assert.deepEqual(task.runs, [zhihuFailure])
@@ -254,15 +391,17 @@ test('publishes only eligible platforms, keeps going after failures, and include
     if (platform === 'juejin') return { saved: true, publishNotice: '请补齐分类和标签。' }
     return { published: true }
   })
-  assert.deepEqual(states(retried), ['failed', 'published', 'saved', 'published'])
+  assert.deepEqual(states(retried), ['failed', 'published', 'saved', 'published', 'published'])
   assert.equal(retried[0].detail, '连接失败')
-  assert.deepEqual(attempts, ['zhihu', 'weibo', 'juejin', 'jianshu'])
+  assert.deepEqual(attempts, ['zhihu', 'weibo', 'juejin', 'jianshu', 'douban'])
 
   task.runs = [{ ...zhihuFailure, state: 'publish-uncertain' }, published]
   attempts.length = 0
   task.runs.push({ platform: 'juejin', state: 'publish-uncertain' })
   task.runs.push({ platform: 'jianshu', state: 'publish-uncertain' })
-  assert.deepEqual(states(await batch(() => assert.fail('unexpected publication'))), ['needs-check', 'already-published', 'needs-check', 'needs-check'])
+  task.runs.push({ platform: 'douban', state: 'publish-uncertain' })
+  assert.deepEqual(states(await batch(() => assert.fail('unexpected publication'))),
+    ['needs-check', 'already-published', 'needs-check', 'needs-check', 'needs-check'])
   assert.deepEqual(attempts, [])
 })
 
@@ -270,7 +409,7 @@ test('persists enabled platforms and includes only those platforms in batch publ
   const root = await mkdtemp(join(tmpdir(), 'article-relay-platforms-'))
   t.after(() => rm(root, { recursive: true, force: true }))
   const store = await TaskStore.open(root)
-  assert.deepEqual(await store.enabledPlatforms(), ['zhihu', 'weibo', 'juejin'])
+  assert.deepEqual(await store.enabledPlatforms(), ['zhihu', 'weibo', 'juejin', 'douban'])
   assert.deepEqual(await store.saveEnabledPlatforms(['jianshu', 'weibo']), ['weibo', 'jianshu'])
   await assert.rejects(store.saveEnabledPlatforms([]), /至少选择一个/)
   await assert.rejects(store.saveEnabledPlatforms(['weibo', 'unknown']), /不支持/)

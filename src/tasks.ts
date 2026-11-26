@@ -5,15 +5,16 @@ import { join } from 'node:path'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import type { ReadableStream as NodeReadableStream } from 'node:stream/web'
+import type { DoubanAudit } from './douban.js'
 import { parseJuejinDefaults, type JuejinDefaults } from './juejin.js'
 import { wechatArticleUrl, type Article } from './wechat.js'
 
 export type ImportState = 'pending' | 'reading' | 'paused' | 'downloading' | 'ready' | 'failed'
 
-export const platformNames = { zhihu: '知乎', weibo: '微博', juejin: '掘金', jianshu: '简书' } as const
+export const platformNames = { zhihu: '知乎', weibo: '微博', juejin: '掘金', jianshu: '简书', douban: '豆瓣' } as const
 export type Platform = keyof typeof platformNames
 const allPlatforms = Object.keys(platformNames) as Platform[]
-const defaultPlatforms = allPlatforms.filter((platform) => platform !== 'jianshu')
+const defaultPlatforms: readonly Platform[] = ['zhihu', 'weibo', 'juejin', 'douban']
 
 function parseEnabledPlatforms(value: unknown): Platform[] {
   if (!Array.isArray(value) || !value.length) throw new Error('请至少选择一个发布平台。')
@@ -33,6 +34,9 @@ export interface SyncRun {
   state: 'running' | 'saved' | 'failed' | 'publishing' | 'published' | 'publish-uncertain'
   draftId?: string
   jianshuNotebookId?: string
+  doubanAudit?: DoubanAudit
+  doubanFingerprint?: string
+  doubanCandidateUrl?: string
   articleId?: string
   articleTitle?: string
   publishedUrl?: string
@@ -49,7 +53,8 @@ export function canCheckJuejinAudit(run: SyncRun): run is SyncRun & { draftId: s
 }
 
 export function canOpenDraft(run: SyncRun, runs: SyncRun[]): run is SyncRun & { draftId: string } {
-  if (!run.draftId || run.draftMissing || (run.platform === 'jianshu' && !run.jianshuNotebookId)) return false
+  if (!run.draftId || run.draftMissing || (run.platform === 'jianshu' && !run.jianshuNotebookId) ||
+      (run.platform === 'douban' && run.doubanCandidateUrl)) return false
   const related = runs.filter((item) => item.platform === run.platform && item.draftId === run.draftId)
   if (related.some((item) => item.state === 'published' || item.state === 'publishing' ||
       (item.platform === 'juejin' && (item.articleId || item.juejinAudit)))) return false
@@ -114,7 +119,7 @@ export async function publishMissingPlatforms(
     const prior = blockingPublication(current.runs, platform)
     if (prior) {
       outcomes.push({ platform, state: prior.state === 'published' ? 'already-published' :
-        prior.juejinAudit === 'reviewing' ? 'reviewing' : 'needs-check' })
+        (prior.juejinAudit ?? prior.doubanAudit) === 'reviewing' ? 'reviewing' : 'needs-check' })
       continue
     }
     try {
