@@ -268,9 +268,19 @@ function publicationActions(task, id, run, canClearLocalHistory = false, current
 
 function articleButton(task, run) {
   const refresh = run.state === 'publish-uncertain' || (run.platform === 'weibo' && !run.publishedUrl)
+  if (!refresh && publishedArticleUrl(run)) return
   const [icon, label] = refresh ? ['restart', '刷新状态'] : ['document', '查看文章']
   return button(icon, label, 'secondary', () => void runAction(async () =>
     showPublishResult(await relay.showArticle(task.id, run.id), run.platform)))
+}
+
+function zhihuPublicationUrl(run) {
+  return run?.platform === 'zhihu' && /^[1-9]\d*$/.test(run.draftId ?? '') ?
+    `https://zhuanlan.zhihu.com/p/${run.draftId}` : ''
+}
+
+function publishedArticleUrl(run) {
+  return run?.state === 'published' ? run.publishedUrl || zhihuPublicationUrl(run) : ''
 }
 
 function platformLink(href, label, open) {
@@ -292,9 +302,8 @@ function publicationLinks(task, id, run) {
   }
   const pending = run?.state === 'publish-uncertain'
   const published = run?.state === 'published'
-  const zhihuUrl = id === 'zhihu' && run?.draftId && /^[1-9]\d*$/.test(run.draftId) ?
-    `https://zhuanlan.zhihu.com/p/${run.draftId}` : ''
-  const url = published ? run.publishedUrl || zhihuUrl : ''
+  const zhihuUrl = zhihuPublicationUrl(run)
+  const url = publishedArticleUrl(run)
   const open = async () => {
     if (id === 'zhihu') {
       await showPublishResult(await relay.openZhihuArticle(task.id, run.id), id)
